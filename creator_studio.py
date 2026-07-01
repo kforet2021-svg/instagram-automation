@@ -7,6 +7,7 @@ creator_studio.py
 【2026-07-02: 出力を「撮影指示書」フォーマット①〜⑧に全面刷新】
 【2026-07-02(2回目): ⑨水平思考・⑩Creator Review・⑪CEO Challengeを追加（OpenAIコストゼロ）】
 【2026-07-02(3回目): ⑪CEO Challengeに「他サロンでも言えるか？」ゲートを追加 — NOになるまで改善】
+【2026-07-02(4回目): ⑫Follower Growth Check追加 — 最優先KPI（フォロワーが増える投稿か？）4項目判定】
 
 目的：Creator Studioを開いたら5分以内に撮影を開始できる状態を作る。
       分析結果の表示ではなく、今日そのまま使える撮影指示書として出力する。
@@ -108,7 +109,8 @@ _DNA_TEMPLATES = [
 次に、リンパを流す。そして骨格の位置を整える。
 この3つ同時にアプローチするのがポイントです。
 
-保存して、気になったときに読み返してください。""",
+保存して、気になったときに読み返してください。
+フォローすると、毎週こういう情報を届けます。""",
 
         "shot_sequence": """\
 【カット1 / 2秒】フック用・静止カット
@@ -186,7 +188,8 @@ _DNA_TEMPLATES = [
 眉間にシワを寄せる・口をギュッと閉じる。
 このクセが毎日積み重なって、顔の形が変わっていきます。
 
-保存して、気になったときに読み返してください。""",
+保存して、気になったときに読み返してください。
+フォローすると、毎週こういう情報を届けます。""",
 
         "shot_sequence": """\
 【カット1 / 2秒】フック用・静止カット
@@ -270,7 +273,8 @@ _DNA_TEMPLATES = [
 CORE HARIでは、筋肉とリンパを整えるところから始めます。
 それだけで、顔の印象がかなり変わります。
 
-保存して、気になったときに読み返してください。""",
+保存して、気になったときに読み返してください。
+フォローすると、毎週こういう情報を届けます。""",
 
         "shot_sequence": """\
 【カット1 / 2秒】フック用・静止カット
@@ -434,7 +438,8 @@ CORE HARIでは、筋肉とリンパを整えるところから始めます。
 個人差はあります。
 でも続けると確実に変わります。それだけは言えます。
 
-気になった方は、プロフィールのリンクからどうぞ。""",
+気になった方は、プロフィールのリンクからどうぞ。
+フォローすると、毎週こういう正直な情報を届けます。""",
 
         "shot_sequence": """\
 【カット1 / 2秒】フック用・静止カット
@@ -518,7 +523,8 @@ CORE HARIでは、筋肉とリンパを整えるところから始めます。
 
 左右差は直せます。あきらめないでください。
 
-保存して、気になったときに読み返してください。""",
+保存して、気になったときに読み返してください。
+フォローすると、毎週こういう情報を届けます。""",
 
         "shot_sequence": """\
 【カット1 / 2秒】フック用・静止カット
@@ -602,7 +608,8 @@ CORE HARIでは、筋肉とリンパを整えるところから始めます。
 施術後はホームケアの説明をして終わりです。
 必要だと思ったことだけお伝えします。無理に何かを売ったりしません。
 
-気になった方は、プロフィールのリンクからどうぞ。""",
+気になった方は、プロフィールのリンクからどうぞ。
+フォローすると、施術の裏側や顔のセルフケア情報を毎週届けます。""",
 
         "shot_sequence": """\
 【カット1 / 2秒】フック用・静止カット
@@ -1125,6 +1132,112 @@ def _generate_ceo_challenge(record: dict, review: dict) -> dict:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# ⑫ Follower Growth Check — 最優先KPI
+#
+# Creator Studio の最優先 KPI は「フォロワーが増える投稿」。
+# 問い合わせはその次。4項目すべて YES でなければ再生成。
+# ────────────────────────────────────────────────────────────────────────────
+
+# ①「役に立ちそう」を示す専門マーカー
+_FG_USEFUL_MARKERS = [
+    "咬筋", "表情グセ", "舌の位置", "表情筋", "正直に言います",
+    "約60種類", "個人差", "順番が", "仕組み", "骨格の大きさは変わりません",
+    "押しつけは一切", "無理に何かを売", "あきらめないでください",
+    "3回目前後", "6回以上", "カウンセリング10〜15", "施術60〜90",
+]
+
+# ②「続きが気になる」を作るマーカー
+_FG_SERIES_MARKERS  = ["毎週", "シリーズ", "続き", "次回", "定期的", "フォローすると", "フォローして"]
+_FG_CURIOSITY_HOOKS = ["実は", "正直に言います", "本当は", "と思っていませんか",
+                        "知っていましたか", "教えます", "話します"]
+
+# ④「フォローする理由」の明示マーカー
+_FG_FOLLOW_REASON_MARKERS = ["フォローすると", "フォローして", "フォローすれば"]
+
+
+def _check_follower_growth(record: dict) -> dict:
+    """
+    Follower Growth Check — 4項目すべてYESが合格条件。
+
+    ① フォロー価値（役に立ちそう）
+    ② 続きが気になる
+    ③ この人にしか聞けない
+    ④ フォローする理由が明確
+
+    判定ロジック:
+    ① 専門マーカーが1件以上 → YES
+    ② シリーズ明示 OR 好奇心フックが2件以上 → YES
+    ③ _CORE_HARI_UNIQUE_MARKERS のいずれかを含む → YES（他サロンチェックと共通）
+    ④ 明示フォローCTA がある OR 専門マーカーが2件以上（暗黙の価値提示） → YES
+       ※ 保存CTA・問い合わせCTA 投稿でも、専門性で価値が伝わればYES
+    """
+    combined = " ".join([
+        record.get("hook", ""),
+        record.get("script_full", ""),
+        record.get("caption", ""),
+        record.get("cta", ""),
+        record.get("threads_text", ""),
+    ])
+
+    useful_count     = sum(1 for m in _FG_USEFUL_MARKERS if m in combined)
+    unique_count     = sum(1 for m in _CORE_HARI_UNIQUE_MARKERS if m in combined)
+    curiosity_count  = sum(1 for m in _FG_CURIOSITY_HOOKS if m in combined)
+    has_series       = any(m in combined for m in _FG_SERIES_MARKERS)
+    has_follow_cta   = any(m in combined for m in _FG_FOLLOW_REASON_MARKERS)
+
+    q1 = useful_count >= 1
+    q2 = has_series or curiosity_count >= 2
+    q3 = unique_count >= 1
+    q4 = has_follow_cta or useful_count >= 2   # 保存CTA投稿でも専門性≥2で暗黙にYES
+
+    # NO の場合の改善アドバイス（具体的・行動可能な形で）
+    advice = {}
+    if not q1:
+        advice["①"] = (
+            "専門知識が見当たりません。\n"
+            "咬筋・表情グセ・舌の位置・「正直に言います」スタンスのいずれかを入れてください。"
+        )
+    if not q2:
+        advice["②"] = (
+            "「続きが気になる」構造がありません。\n"
+            "・「フォローすると毎週こういう情報を届けます」を台本の最後に入れる\n"
+            "・または「実は」「正直に言います」など好奇心フックを2か所以上入れる"
+        )
+    if not q3:
+        advice["③"] = (
+            "「この人にしか聞けない」視点がありません。\n"
+            "咬筋優位・舌の位置・表情グセ・「骨格の大きさは変わりません。正直に言います。」\n"
+            "など、CORE HARIだけが持つ切り口を1つ以上入れてください。"
+        )
+    if not q4:
+        advice["④"] = (
+            "フォローする理由が見えません。\n"
+            "・「フォローすると、毎週顔のセルフケア情報をお届けします」を明示する\n"
+            "・または専門用語を2件以上使って「この人は知識がある」を示す"
+        )
+
+    all_yes   = q1 and q2 and q3 and q4
+    items = {
+        "①役に立ちそう":           q1,
+        "②続きが気になる":          q2,
+        "③この人にしか聞けない":    q3,
+        "④フォローする理由が明確":  q4,
+    }
+
+    return {
+        "all_yes": all_yes,
+        "items":   items,
+        "advice":  advice,
+        # デバッグ用カウント
+        "_useful_count":    useful_count,
+        "_unique_count":    unique_count,
+        "_curiosity_count": curiosity_count,
+        "_has_series":      has_series,
+        "_has_follow_cta":  has_follow_cta,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # レコード組み立て
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -1163,12 +1276,13 @@ def _assemble(today: str, source_type: str, source_url: str,
         "feedback_url_placeholder": "（投稿後にURLを記入）",
     }
 
-    # ⑨⑩⑪ をレコードに埋め込む（"_" プレフィックスで sheets_writer には書かれない）
+    # ⑨〜⑫ をレコードに埋め込む（"_" プレフィックスで sheets_writer には書かれない）
     lateral_data = _LATERAL_THINKING.get(theme, _LATERAL_FALLBACK)
-    record["_lateral"]       = lateral_data
+    record["_lateral"]          = lateral_data
     review = _compute_creator_review(record)
-    record["_creator_review"] = review
-    record["_ceo_challenge"]  = _generate_ceo_challenge(record, review)
+    record["_creator_review"]   = review
+    record["_ceo_challenge"]    = _generate_ceo_challenge(record, review)
+    record["_follower_growth"]  = _check_follower_growth(record)  # ⑫ 最優先KPI
 
     return record
 
@@ -1564,5 +1678,30 @@ def print_creator_studio_summary(record: dict) -> None:
             print(f"  {'─'*50}")
             body(improve, indent=4)
             print(f"  {'─'*50}")
+
+    # ── ⑫ Follower Growth Check ─────────────────────────────────
+    fg = record.get("_follower_growth", {})
+    if fg:
+        sec("⑫", "Follower Growth Check【最優先KPI: フォロワーが増える投稿か？】")
+        items  = fg.get("items", {})
+        advice = fg.get("advice", {})
+        all_yes = fg.get("all_yes", False)
+
+        print()
+        for label, ok in items.items():
+            icon = "✅ YES" if ok else "❌ NO "
+            print(f"  {icon}  {label}")
+
+        print(f"\n  {'─'*50}")
+        if all_yes:
+            print(f"  ✅ PASS — この投稿はフォロワーを増やせます。投稿してください。")
+        else:
+            no_labels = [label for label, ok in items.items() if not ok]
+            print(f"  ❌ FAIL — 再生成が必要です（NOが{len(no_labels)}項目）")
+            print(f"\n  【改善アクション】")
+            for q_key, hint in advice.items():
+                print(f"\n  {q_key}:")
+                body(hint, indent=4)
+        print(f"  {'─'*50}")
 
     print(f"\n{THICK}\n")
