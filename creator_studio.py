@@ -5,6 +5,7 @@ creator_studio.py
 【2026-07-01(3回目): セリフ・撮影順序・動画タイトルを具体化】
 【2026-07-01(4回目): Creator Intelligence Platform対応 — Vertical ローダー追加】
 【2026-07-02: 出力を「撮影指示書」フォーマット①〜⑧に全面刷新】
+【2026-07-02(2回目): ⑨水平思考・⑩Creator Review・⑪CEO Challengeを追加（OpenAIコストゼロ）】
 
 目的：Creator Studioを開いたら5分以内に撮影を開始できる状態を作る。
       分析結果の表示ではなく、今日そのまま使える撮影指示書として出力する。
@@ -803,6 +804,360 @@ CORE HARIでは、まずリンパを整えるところから始めます。
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# ⑨ 水平思考（Lateral Thinking） — テーマ別に3案 + 推奨案
+# ────────────────────────────────────────────────────────────────────────────
+
+_LATERAL_THINKING = {
+    "小顔矯正が何にアプローチするか": {
+        "proposals": [
+            ("逆説的切り口",
+             "「1回で変わります」と言わない動画",
+             "「1回で変わる」をウリにする競合が多い中、"
+             "「正直に言うと1回では形は変わりません」と先に言う。"
+             "誠実さそのものがフックになり、信頼で差別化できます。"),
+            ("他業界応用",
+             "「整体の問診票」を顔施術に応用する動画",
+             "整体院は最初に姿勢・生活習慣を問診票で確認する。"
+             "同じ発想で「顔の問診票（噛み癖・寝る向き・スマホ習慣）」を紹介し、"
+             "視聴者が自分で原因に気づく構成にする。"),
+            ("え？視点",
+             "「施術で一番大事な60種類の筋肉、あなたは何個知ってますか？」",
+             "「顔の筋肉は60種類」という事実を、クイズ形式で問いかける。"
+             "視聴者が「え、そんなにあるの？」と止まる。"
+             "知識格差がそのままフックになる構成です。"),
+        ],
+        "rec": 2,
+        "rec_reason":
+            "「え？視点」案を推奨。CORE HARIの専門性を具体的な数字で示せる上、"
+            "クイズ形式でコメント（「知らなかった！」）が自然に集まりやすい構成です。",
+    },
+    "老け見えの正体は顔筋の衰え": {
+        "proposals": [
+            ("逆説的切り口",
+             "「スキンケアをやめた方が顔が若返る場合がある」",
+             "過剰な保湿・クレンジングがリンパを詰まらせ、むくみを悪化させるケースを切り口に。"
+             "「やらない方がいいケア」は保存率が高いテーマです。"),
+            ("他業界応用",
+             "「スポーツコーチが直す『フォームの癖』を、顔筋で再現する」",
+             "アスリートがフォームの癖を直すように、顔にも「使い方の癖」がある。"
+             "スポーツ経験のある視聴者に刺さる比喩で、専門性の伝わり方が変わります。"),
+            ("え？視点",
+             "「老けた原因は鏡の見すぎかもしれない」",
+             "鏡を見るたびに眉間にシワを寄せるクセが強化される逆説。"
+             "「鏡を見るの、少し減らしてみてください」という締めが意外性を生みます。"),
+        ],
+        "rec": 1,
+        "rec_reason":
+            "「他業界応用（スポーツコーチ比喩）」を推奨。"
+            "「顔筋 = 体の筋肉と同じ」というCORE HARIのコア哲学を、"
+            "スポーツという身近な比喩で瞬時に理解させられます。ブランドらしさとも完全一致。",
+    },
+    "骨格より先にむくみとリンパを整える": {
+        "proposals": [
+            ("逆説的切り口",
+             "「骨格矯正したいなら、最初に骨に触ってはいけない」",
+             "骨格より先にリンパ・むくみを整えることをCORE HARIの原則として言い切る。"
+             "「え、順番があるの？」という意外性がフックになります。"),
+            ("他業界応用",
+             "「家の浸水を止めてから壁紙を直す。顔も同じです」",
+             "工務店は浸水を放置して内装を直さない。顔のむくみ＝浸水、骨格＝内装。"
+             "この比喩は「なぜ骨格より先にリンパなのか」を直感的に伝えられます。"),
+            ("え？視点",
+             "「顔が大きい人は、実は顔が小さい」",
+             "骨格は平均的でも、むくみで大きく見えているケースが多いという事実。"
+             "「え？」という停止力がある上、「だからむくみから整えるんです」への流れが自然です。"),
+        ],
+        "rec": 2,
+        "rec_reason":
+            "「え？視点」案を推奨。「顔が大きい人は実は顔が小さい」は、"
+            "悩みを持つ視聴者が一瞬「え？」と止まる最大の停止力を持ちます。"
+            "その後の解説への流れも自然で、保存率が上がりやすい構成です。",
+    },
+    "顔を老けさせている3つのグセ": {
+        "proposals": [
+            ("逆説的切り口",
+             "「表情豊かな人ほど老けやすい」",
+             "豊かな表情は美しいが、筋肉の偏った使い方がシワを深くする逆説。"
+             "「でも表情は消さなくていい。使い方を整えればいい」という結論が救いになります。"),
+            ("他業界応用",
+             "「ゴルフのグリップ矯正を、顔グセに応用する」",
+             "ゴルフのプロコーチは最初にグリップを直す。顔グセも同じで「正しい使い方」に直すだけ。"
+             "「顔の動き方に正解がある」という発想が新鮮に映ります。"),
+            ("え？視点",
+             "「笑顔が老け見えの原因になっていませんか？」",
+             "口角を上げるとき、目を細めるとき、どこに力を入れているか。"
+             "「正しく笑えると、笑顔で若返る」という逆説がフックになります。"),
+        ],
+        "rec": 2,
+        "rec_reason":
+            "「え？視点（笑顔が老け見えの原因）」を推奨。"
+            "視聴者の思い込みを正面から壊すフックで、コメント（「え、笑っちゃダメ？」）が集まりやすい。"
+            "「正しく笑えば若返る」という結論がポジティブで、CORE HARIのブランドトーンとも合います。",
+    },
+    "施術回数ごとの正直なタイムライン": {
+        "proposals": [
+            ("逆説的切り口",
+             "「変わりたいなら、変わることを期待しないほうがいい」",
+             "焦りが「効果が出たか」を過剰にチェックさせ、グセが抜けにくくする。"
+             "「期待を手放すと、変化に気づける」という逆説が誠実さと差別化になります。"),
+            ("他業界応用",
+             "「フィットネスジムの体重グラフを、顔の変化に応用する」",
+             "体重は週単位では変動するが、月単位では着実に変わる。顔の変化も同じ。"
+             "「変化を信じるための見方」を教えるコンテンツは保存率が上がります。"),
+            ("え？視点",
+             "「1回で変わったと言っている人に聞いてはいけない」",
+             "1回で劇的に変わった人はむくみが主因。骨格・筋肉系は時間がかかる。"
+             "「あなたに合ったペースがある」という正直な説明が、かえって信頼を生みます。"),
+        ],
+        "rec": 2,
+        "rec_reason":
+            "「え？視点（1回で変わった人に聞くな）」を推奨。"
+            "SNSの「〇回で劇変！」という誇大表現を、正直さで逆手に取るフックです。"
+            "「正直に言う」というCORE HARIのブランド軸と完全一致し、信頼で差別化できます。",
+    },
+    "顔の左右差はクセから来る": {
+        "proposals": [
+            ("逆説的切り口",
+             "「左右対称を目指すと、逆に左右差が強くなる」",
+             "鏡を見るたびに左右を比べることで、片側への意識が偏りクセが強化される逆説。"
+             "「鏡より感覚を信じて」という締めがCORE HARIらしい誠実さになります。"),
+            ("他業界応用",
+             "「デスクチェアの高さ調整（エルゴノミクス）で顔の左右差を直す発想」",
+             "オフィスワーカーが姿勢の非対称性で体を壊すのと同じ原理。"
+             "「椅子の高さ・モニターの位置を直すと顔も整う」という切り口が意外性を生みます。"),
+            ("え？視点",
+             "「左右が揃っている顔が最も美しいわけではない」",
+             "完全対称な顔は実は人工的に見える。「自然な非対称性を活かしながら整える」がゴール。"
+             "「対称にしたい」という視聴者の思い込みを優しく外す構成です。"),
+        ],
+        "rec": 0,
+        "rec_reason":
+            "「逆説的切り口（左右を比べると逆に悪化する）」を推奨。"
+            "「鏡で見すぎている」行動を指摘することで自己関連性が高まります。"
+            "CORE HARIの「押しつけない誠実さ」という哲学と完全に一致した構成です。",
+    },
+    "初めての小顔矯正・当日の流れ": {
+        "proposals": [
+            ("逆説的切り口",
+             "「初めての施術は、変わらなくていい」",
+             "「変化を期待する前に、施術者の手を感じることに集中してほしい」という哲学を前に出す。"
+             "過大期待をしないことを先に言うことで、かえって信頼が生まれます。"),
+            ("他業界応用",
+             "「高級レストランがシェフのおまかせコースを最初に勧める理由を、施術に応用する」",
+             "初めての顧客に「まず体験してほしい」という姿勢は、一流レストランと同じ。"
+             "「CORE HARIのファーストコースメニュー」という表現で付加価値が伝わります。"),
+            ("え？視点",
+             "「来る前にキャンセルしてもいい、ということをお伝えしています」",
+             "「施術を受ける・受けない」の選択権をお客様に渡すことを、最初から伝えている。"
+             "「押しつけません」より強いメッセージで、CORE HARIの哲学が伝わります。"),
+        ],
+        "rec": 2,
+        "rec_reason":
+            "「え？視点（来る前にキャンセルしてもいい）」を推奨。"
+            "「お客様に選択権を渡す」というCORE HARIの非営業スタンスを最も強く表現できます。"
+            "「こんなサロン初めて」というコメントが集まりやすく、フォロー・問い合わせに直結します。",
+    },
+}
+
+_LATERAL_FALLBACK = {
+    "proposals": [
+        ("逆説的切り口",
+         "「やらない方がいいこと」を最初に伝える",
+         "何かを『しなければ』という発想より、まず『やめること』を教える動画は保存率が上がります。"
+         "CORE HARIのテーマをこの切り口で考え直してみてください。"),
+        ("他業界応用",
+         "「スポーツコーチの原則」をこのテーマに応用する",
+         "スポーツコーチは『正しいフォームを直す』より先に『悪いクセを除く』ことを優先します。"
+         "顔・身体のテーマは多くの場合この発想で再構成できます。"),
+        ("え？視点",
+         "「常識の逆を言ったら、どうなるか？」を考える",
+         "このテーマで一般的に信じられていることは何か？"
+         "それを丁寧に否定または更新できる事実がCORE HARIの知識の中にあるはずです。"),
+    ],
+    "rec": 0,
+    "rec_reason":
+        "上記3案はいずれもCORE HARIのテーマに応用可能な汎用フレームです。"
+        "最もブランドらしい誠実さ・専門性を表現できる案を選んでください。",
+}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# ⑩ Creator Review — 10項目自己採点（ルールベース、OpenAIコストゼロ）
+# ────────────────────────────────────────────────────────────────────────────
+
+def _compute_creator_review(record: dict) -> dict:
+    hook        = record.get("hook", "")
+    script      = record.get("script_full", "")
+    cta         = record.get("cta", "")
+    shot_seq    = record.get("shot_sequence", "")
+    brand_score = int(record.get("brand_score", "80") or 80)
+    cuts        = int(record.get("shooting_cuts", "6") or 6)
+    combined    = f"{hook} {script} {cta}"
+
+    # 1. フック: 疑問形・共感語があるか
+    hook_q = any(c in hook for c in ["？", "ですか", "ませんか", "でしょうか"])
+    hook_e = any(w in hook for w in ["気がする", "かもしれ", "悩み", "不安", "方へ"])
+    s_hook = 90 if hook_q else (85 if hook_e else 72)
+
+    # 2. 専門性: CORE HARI固有ワード
+    expert_words = ["筋肉", "リンパ", "骨格", "顔筋", "むくみ", "フェイスライン",
+                    "ほうれい線", "施術", "コリ", "たるみ", "表情グセ"]
+    s_expert = min(95, 65 + sum(4 for w in expert_words if w in combined))
+
+    # 3. 独自性: 逆説・正直告白があるか
+    unique_markers = ["正直に", "本当は", "実は", "と思っていませんか", "仕方ない", "無理", "変わりません"]
+    s_unique = min(92, 72 + sum(5 for w in unique_markers if w in combined))
+
+    # 4. 保存されやすさ: CTA種別
+    s_save = 92 if "保存" in cta else (80 if "フォロー" in cta else 75)
+
+    # 5. 共感: フックに共感ワード
+    empathy_words = ["気になる", "悩み", "不安", "感じ", "気がする", "辛い", "多い"]
+    s_empathy = min(92, 72 + sum(5 for w in empathy_words if w in hook))
+
+    # 6. 信頼性: 正直表明・個人差・否定しない
+    trust_markers = ["正直", "個人差", "変わりません", "あきらめない", "言えます",
+                     "必ず言え", "一切しません"]
+    s_trust = min(95, 72 + sum(5 for w in trust_markers if w in combined))
+
+    # 7. ブランドらしさ: brand_score から直接算出
+    s_brand = brand_score
+
+    # 8. 撮影しやすさ: カット数が少ないほど楽（6カット以下 = 高得点）
+    s_shoot = 92 if cuts <= 5 else (86 if cuts == 6 else 75)
+
+    # 9. 編集しやすさ: editing_notesが設定されているか
+    has_editing = bool(record.get("editing_notes", "").strip())
+    s_edit = 90 if has_editing else 70
+
+    # 10. CTA: 動詞が明確か（「保存して」「フォローすると」「プロフィールのリンクから」）
+    cta_verbs = ["保存して", "フォローすると", "プロフィールのリンク", "リンクから"]
+    s_cta = min(95, 72 + sum(6 for v in cta_verbs if v in cta))
+
+    scores = {
+        "フック":       s_hook,
+        "専門性":       s_expert,
+        "独自性":       s_unique,
+        "保存されやすさ": s_save,
+        "共感":         s_empathy,
+        "信頼性":       s_trust,
+        "ブランドらしさ": s_brand,
+        "撮影しやすさ":  s_shoot,
+        "編集しやすさ":  s_edit,
+        "CTA":          s_cta,
+    }
+
+    avg = round(sum(scores.values()) / len(scores), 1)
+
+    # 改善点TOP3（スコアが低い順）
+    sorted_items = sorted(scores.items(), key=lambda x: x[1])
+    top3_improvements = []
+    advice_map = {
+        "フック":       "冒頭3秒に疑問形（「〜って知ってますか？」）または強い共感語を入れてください",
+        "専門性":       "顔筋・リンパ・骨格など、CORE HARI固有の専門ワードをもう1〜2個追加してください",
+        "独自性":       "「正直に言うと…」「よく誤解されますが…」など、常識を更新する一文を入れてください",
+        "保存されやすさ": "CTAを「保存して、気になったときに読み返してください」に変更すると保存率が上がります",
+        "共感":         "フック（0〜3秒）にターゲットの悩みワード（たるみ・むくみ・左右差）を具体的に入れてください",
+        "信頼性":       "「個人差はあります」「正直に言います」など、誠実な補足を1〜2文追加してください",
+        "ブランドらしさ": "NGワード（痛い・怖い・劇的・激変）がないか再確認してください",
+        "撮影しやすさ":  "カット数を5〜6に絞ると撮影・編集の負担が下がります",
+        "編集しやすさ":  "編集指示（尺・字幕・BGM・色味・カット割り）を明記してください",
+        "CTA":          "CTAに動詞を明確に（「保存して」「フォローすると」「リンクから」）入れてください",
+    }
+    for item, sc in sorted_items[:3]:
+        top3_improvements.append(f"{item}（{sc}点）: {advice_map.get(item, '内容を強化してください')}")
+
+    # 伸びない可能性
+    risks = []
+    if s_hook < 80:
+        risks.append("フックが弱く最初の3秒で離脱される可能性があります")
+    if s_unique < 80:
+        risks.append("類似投稿が多く埋もれる可能性があります（独自性の強化を）")
+    if s_save < 80:
+        risks.append("保存・フォローにつながりにくく拡散力が落ちる可能性があります")
+    if not risks:
+        risks.append("大きなリスクは見当たりません。改善してさらに伸ばしましょう")
+
+    predicted_after = min(99, round(avg + 6))
+
+    return {
+        "scores":            scores,
+        "average":           avg,
+        "top3_improvements": top3_improvements,
+        "risk":              "・".join(risks),
+        "predicted_after":   predicted_after,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# ⑪ CEO Challenge — 「森このみ本人が投稿したいか？」
+# ────────────────────────────────────────────────────────────────────────────
+
+def _generate_ceo_challenge(record: dict, review: dict) -> dict:
+    avg = review["average"]
+    brand_score = int(record.get("brand_score", "80") or 80)
+    hook = record.get("hook", "")
+    script = record.get("script_full", "")
+    combined = f"{hook} {script}"
+
+    # NGワード検出
+    ng_words = _BRAND.ng_words
+    ng_hits = [w for w in ng_words if w in combined]
+
+    # NG概念チェック（簡易）: 恐怖訴求・他者否定・過大表現
+    ng_concept_markers = ["絶対に変わる", "必ず", "〇〇日で", "危険", "失敗しない", "完璧"]
+    concept_hits = [m for m in ng_concept_markers if m in combined]
+
+    # 判定: NGワードがある or avg < 78 or brand_score < 78 → NO
+    is_no = bool(ng_hits) or bool(concept_hits) or avg < 78 or brand_score < 78
+
+    if is_no:
+        reasons_no = []
+        if ng_hits:
+            reasons_no.append(f"NGワード検出: {', '.join(ng_hits)}")
+        if concept_hits:
+            reasons_no.append(f"NG表現検出: {', '.join(concept_hits)}")
+        if avg < 78:
+            reasons_no.append(f"Creator Review平均点が{avg}点（目標78点以上）")
+        if brand_score < 78:
+            reasons_no.append(f"Brand Score {brand_score}点（目標78点以上）")
+
+        # 改善指示
+        improve_hints = []
+        if avg < 78:
+            w_item, w_score = min(review["scores"].items(), key=lambda x: x[1])
+            improve_hints.append(f"「{w_item}」（{w_score}点）を最優先で改善してください")
+        if ng_hits:
+            improve_hints.append(
+                f"NGワードを削除・言い換えてください: "
+                + " / ".join(f"「{w}」→ より柔らかい表現" for w in ng_hits)
+            )
+
+        return {
+            "verdict":  "NO — まだ改善が必要です",
+            "reason":   "・".join(reasons_no),
+            "improve":  "\n".join(improve_hints) or "Creator Reviewの最低スコア項目を優先改善してください",
+        }
+
+    # YES の場合：なぜ自信を持って投稿できるかを一言で
+    strength = []
+    if review["scores"].get("信頼性", 0) >= 88:
+        strength.append("「正直に言う」スタンスが一貫している")
+    if review["scores"].get("専門性", 0) >= 85:
+        strength.append("CORE HARI固有の専門知識が使われている")
+    if review["scores"].get("フック", 0) >= 85:
+        strength.append("最初の3秒で視聴者が止まれる")
+    if not strength:
+        strength.append("ブランドラインを守りながら価値ある情報を届けられている")
+
+    return {
+        "verdict": "YES — 投稿してください",
+        "reason":  "・".join(strength),
+        "improve": "",
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # レコード組み立て
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -815,7 +1170,7 @@ def _assemble(today: str, source_type: str, source_url: str,
     cut_count = tmpl.get("cut_count", 6)
     total_sec = tmpl.get("total_sec", 45)
 
-    return {
+    record = {
         "date":          today,
         "source_type":   source_type,
         "source_url":    source_url,
@@ -840,6 +1195,15 @@ def _assemble(today: str, source_type: str, source_url: str,
         "brand_notes":   notes,
         "feedback_url_placeholder": "（投稿後にURLを記入）",
     }
+
+    # ⑨⑩⑪ をレコードに埋め込む（"_" プレフィックスで sheets_writer には書かれない）
+    lateral_data = _LATERAL_THINKING.get(theme, _LATERAL_FALLBACK)
+    record["_lateral"]       = lateral_data
+    review = _compute_creator_review(record)
+    record["_creator_review"] = review
+    record["_ceo_challenge"]  = _generate_ceo_challenge(record, review)
+
+    return record
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1116,4 +1480,61 @@ def print_creator_studio_summary(record: dict) -> None:
     score = record.get("brand_score", "")
     print(f"  Brand Check: {score}/100")
     body(record.get("brand_notes", ""), indent=2)
+
+    # ── ⑨ 水平思考（Lateral Thinking）────────────────────────────────
+    lateral = record.get("_lateral", {})
+    if lateral:
+        sec("⑨", "水平思考（Lateral Thinking）— もっと意外な切り口はないか？")
+        proposals = lateral.get("proposals", [])
+        for i, p in enumerate(proposals):
+            angle_type, title, pitch = p[0], p[1], p[2]
+            prefix = "★ 推奨 " if i == lateral.get("rec", -1) else "  案 "
+            print(f"\n{prefix}{i+1}【{angle_type}】")
+            print(f"    タイトル案: 「{title}」")
+            print(f"    説明: {pitch}")
+        rec_reason = lateral.get("rec_reason", "")
+        if rec_reason:
+            print(f"\n  【推奨理由】")
+            body(rec_reason, indent=4)
+
+    # ── ⑩ Creator Review（自己採点）────────────────────────────────
+    review = record.get("_creator_review", {})
+    if review:
+        sec("⑩", "Creator Review — 10項目自己採点")
+        scores = review.get("scores", {})
+        avg = review.get("average", 0)
+        print()
+        items_order = [
+            "フック", "専門性", "独自性", "保存されやすさ",
+            "共感", "信頼性", "ブランドらしさ", "撮影しやすさ", "編集しやすさ", "CTA"
+        ]
+        for item in items_order:
+            sc = scores.get(item, 0)
+            bar = "■" * (sc // 10) + "□" * (10 - sc // 10)
+            print(f"  {item:<10s}: {bar} {sc}点")
+        print(f"\n  {'─'*40}")
+        print(f"  総合平均: {avg}点 / 100点")
+        print(f"\n  【改善点 TOP3】")
+        for imp in review.get("top3_improvements", []):
+            print(f"    ▶ {imp}")
+        print(f"\n  【伸びない可能性】")
+        body(review.get("risk", ""), indent=4)
+        print(f"\n  【改善後の予測スコア】{review.get('predicted_after', '')}点")
+
+    # ── ⑪ CEO Challenge ──────────────────────────────────────────
+    ceo = record.get("_ceo_challenge", {})
+    if ceo:
+        sec("⑪", "CEO Challenge — 「森このみ本人が見たら、投稿したい！と思うか？」")
+        verdict = ceo.get("verdict", "")
+        icon = "✅" if verdict.startswith("YES") else "❌"
+        print(f"\n  {icon} {verdict}")
+        reason = ceo.get("reason", "")
+        if reason:
+            print(f"\n  【理由】")
+            body(reason, indent=4)
+        improve = ceo.get("improve", "")
+        if improve:
+            print(f"\n  【改善してから投稿してください】")
+            body(improve, indent=4)
+
     print(f"\n{THICK}\n")
