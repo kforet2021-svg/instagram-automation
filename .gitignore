@@ -1,0 +1,22 @@
+# secrets
+.env
+*.json
+service_account.json
+core-hari-instagram-*.json
+
+# python
+__pycache__/
+*.pyc
+
+# mac
+.DS_Store
+
+# temp/debug
+debug_snapshot.json
+test_write_check.tmp
+
+# local tool/cache
+.claude/
+
+# generated reports
+reports/

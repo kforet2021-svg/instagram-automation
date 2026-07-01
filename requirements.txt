@@ -1,0 +1,10 @@
+# apify-client: 2026-06-29にApifyを完全停止したため、main.pyの実行には不要。
+# apify_fetcher.py / competitor_discovery.py をバックアップとして手動で
+# 再度有効化する場合にのみ必要(未インストールでも python3 main.py は動作する)。
+apify-client>=1.6.0
+requests>=2.31.0
+openai>=1.30.0
+gspread>=6.0.0
+google-auth>=2.25.0
+python-dotenv>=1.0.0
+openpyxl>=3.1.0
