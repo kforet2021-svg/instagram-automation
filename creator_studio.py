@@ -6,6 +6,7 @@ creator_studio.py
 【2026-07-01(4回目): Creator Intelligence Platform対応 — Vertical ローダー追加】
 【2026-07-02: 出力を「撮影指示書」フォーマット①〜⑧に全面刷新】
 【2026-07-02(2回目): ⑨水平思考・⑩Creator Review・⑪CEO Challengeを追加（OpenAIコストゼロ）】
+【2026-07-02(3回目): ⑪CEO Challengeに「他サロンでも言えるか？」ゲートを追加 — NOになるまで改善】
 
 目的：Creator Studioを開いたら5分以内に撮影を開始できる状態を作る。
       分析結果の表示ではなく、今日そのまま使える撮影指示書として出力する。
@@ -954,29 +955,126 @@ def _compute_creator_review(record: dict) -> dict:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# ⑪ CEO Challenge — 「森このみ本人が投稿したいか？」
+# 「他サロンでも言えるか？」ゲート
+# ────────────────────────────────────────────────────────────────────────────
+
+# CORE HARIだけが持つ「その人しか言えない視点」のマーカー。
+# これが1件でも検出されれば → 他サロンには言えない（NOを返す）。
+_CORE_HARI_UNIQUE_MARKERS = {
+    "咬筋優位":           "咬筋優位という専門的切り口（片側噛み・食いしばりとフェイスラインの関係）",
+    "咬筋の左右差":       "咬筋の左右差という観察視点",
+    "咬筋が":             "咬筋の変化・働きへの具体的言及",
+    "舌の位置":           "舌の位置とフェイスライン・たるみの関係",
+    "舌が下":             "舌低位がもたらす顔への影響",
+    "上あごにつける":     "正しい舌の位置（上あご）の具体的指示",
+    "表情グセ":           "表情グセという独自の概念・切り口",
+    "表情筋の使い方":     "表情筋の「使い方の偏り」という切り口（単なる衰えではない）",
+    "約60種類":           "顔の筋肉が約60種類という具体的事実",
+    "正直に言います":     "CORE HARIの「正直な告白」スタンス",
+    "押しつけは一切しません": "非営業スタンスの明言（CORE HARIの哲学）",
+    "あきらめないでください": "お客様への個人的な励まし（CORE HARIのトーン）",
+    "変わりません。正直": "変わらないことを先に言う誠実さ（CORE HARIの逆張り）",
+    "骨格の大きさは変わりません": "骨格は変わらないという正直な告白",
+    "カウンセリング10〜15": "カウンセリング所要時間の具体的開示",
+    "施術60〜90":         "施術時間の具体的開示",
+    "3回目前後":          "効果が出る回数の具体的タイムライン",
+    "6回以上で":          "変化定着の目安という具体的指標",
+    "それだけは言えます": "言い切れることだけ言うという誠実さ",
+    "無理に何かを売":     "売らないスタンスの明言",
+}
+
+# 汎用フレーズ（これだけで構成されていると他サロンでも言える）
+_GENERIC_BEAUTY_PHRASES = [
+    "むくみ", "リンパ", "たるみ", "ほうれい線", "フェイスライン",
+    "小顔", "スキンケア", "老け見え", "保湿", "引き上げ", "リフトアップ",
+    "顔のコリ", "血行", "代謝",
+]
+
+
+def _check_other_salon_could_say(record: dict) -> dict:
+    """
+    「この投稿は他サロンでも言えるか？」を自己判定する。
+
+    CORE HARI固有マーカーが1件でも検出されれば → 他サロンには言えない（unique=True）。
+    0件なら → 他サロンでも言える（unique=False）→ CEO Challenge は自動 NO。
+
+    戻り値:
+      {
+        "is_unique": bool,           # True = 他サロンには言えない（合格）
+        "verdict": str,              # "NO（他サロンには言えない）" or "YES（他サロンでも言える）"
+        "found_unique": list[str],   # 検出されたユニーク要素の説明
+        "found_generic": list[str],  # 検出された汎用フレーズ
+        "missing_hint": str,         # unique=Falseのとき、追加すべき要素のヒント
+      }
+    """
+    combined = " ".join([
+        record.get("hook", ""),
+        record.get("script_full", ""),
+        record.get("caption", ""),
+    ])
+
+    found_unique  = [desc for marker, desc in _CORE_HARI_UNIQUE_MARKERS.items()
+                     if marker in combined]
+    found_generic = [w for w in _GENERIC_BEAUTY_PHRASES if w in combined]
+
+    is_unique = len(found_unique) > 0
+
+    if is_unique:
+        verdict = "NO（他サロンには言えない）✅"
+        missing_hint = ""
+    else:
+        verdict = "YES（他サロンでも言える）❌ — 再生成が必要"
+        # どのユニーク要素を追加すると固有性が出るかを提案
+        suggestions = [
+            "「咬筋優位」「咬筋の左右差」など、筋肉名を具体的に入れる",
+            "「舌の位置」「舌を上あごにつける」など、日常のクセへの具体的指示を入れる",
+            "「表情グセ」という言葉を使い、どんなクセが問題かを具体的に示す",
+            "「正直に言います」「変わりません」など、CORE HARIの誠実スタンスを前面に出す",
+            "「押しつけは一切しません」「無理に何かを売りません」など、非営業姿勢を明言する",
+            "回数・時間・種類数など、具体的な数字を1つ以上入れる",
+        ]
+        missing_hint = "\n".join(f"  ▶ {s}" for s in suggestions)
+
+    return {
+        "is_unique":    is_unique,
+        "verdict":      verdict,
+        "found_unique": found_unique,
+        "found_generic": found_generic,
+        "missing_hint": missing_hint,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# ⑪ CEO Challenge — 「森このみ本人が投稿したいか？」＋「他サロンでも言えるか？」
 # ────────────────────────────────────────────────────────────────────────────
 
 def _generate_ceo_challenge(record: dict, review: dict) -> dict:
-    avg = review["average"]
+    avg         = review["average"]
     brand_score = int(record.get("brand_score", "80") or 80)
-    hook = record.get("hook", "")
-    script = record.get("script_full", "")
-    combined = f"{hook} {script}"
+    hook        = record.get("hook", "")
+    script      = record.get("script_full", "")
+    combined    = f"{hook} {script}"
 
-    # NGワード検出
-    ng_words = _BRAND.ng_words
-    ng_hits = [w for w in ng_words if w in combined]
+    # ── Gate 1: 「他サロンでも言えるか？」 ──────────────────────────
+    salon_check = _check_other_salon_could_say(record)
 
-    # NG概念チェック（簡易）: 恐怖訴求・他者否定・過大表現
+    # ── Gate 2: NGワード ────────────────────────────────────────────
+    ng_hits = [w for w in _BRAND.ng_words if w in combined]
+
+    # ── Gate 3: NG概念 ──────────────────────────────────────────────
     ng_concept_markers = ["絶対に変わる", "必ず", "〇〇日で", "危険", "失敗しない", "完璧"]
     concept_hits = [m for m in ng_concept_markers if m in combined]
 
-    # 判定: NGワードがある or avg < 78 or brand_score < 78 → NO
-    is_no = bool(ng_hits) or bool(concept_hits) or avg < 78 or brand_score < 78
+    # ── Gate 4: Creator Review 点数 ─────────────────────────────────
+    score_fail = avg < 78 or brand_score < 78
+
+    # ── 総合判定 ─────────────────────────────────────────────────────
+    is_no = (not salon_check["is_unique"]) or bool(ng_hits) or bool(concept_hits) or score_fail
 
     if is_no:
         reasons_no = []
+        if not salon_check["is_unique"]:
+            reasons_no.append("他サロンでも言える内容になっている（固有視点ゼロ）")
         if ng_hits:
             reasons_no.append(f"NGワード検出: {', '.join(ng_hits)}")
         if concept_hits:
@@ -986,25 +1084,29 @@ def _generate_ceo_challenge(record: dict, review: dict) -> dict:
         if brand_score < 78:
             reasons_no.append(f"Brand Score {brand_score}点（目標78点以上）")
 
-        # 改善指示
         improve_hints = []
-        if avg < 78:
-            w_item, w_score = min(review["scores"].items(), key=lambda x: x[1])
-            improve_hints.append(f"「{w_item}」（{w_score}点）を最優先で改善してください")
+        if not salon_check["is_unique"]:
+            improve_hints.append("【固有視点を追加する】\n" + salon_check["missing_hint"])
         if ng_hits:
             improve_hints.append(
-                f"NGワードを削除・言い換えてください: "
-                + " / ".join(f"「{w}」→ より柔らかい表現" for w in ng_hits)
+                "【NGワードを言い換える】\n"
+                + "\n".join(f"  「{w}」→ より柔らかい表現に" for w in ng_hits)
             )
+        if score_fail:
+            w_item, w_score = min(review["scores"].items(), key=lambda x: x[1])
+            improve_hints.append(f"【最低スコア項目を改善】\n  「{w_item}」（{w_score}点）を優先してください")
 
         return {
-            "verdict":  "NO — まだ改善が必要です",
-            "reason":   "・".join(reasons_no),
-            "improve":  "\n".join(improve_hints) or "Creator Reviewの最低スコア項目を優先改善してください",
+            "verdict":      "NO — 投稿しないでください",
+            "reason":       "・".join(reasons_no),
+            "improve":      "\n\n".join(improve_hints),
+            "salon_check":  salon_check,
         }
 
-    # YES の場合：なぜ自信を持って投稿できるかを一言で
+    # ── YES ──────────────────────────────────────────────────────────
     strength = []
+    if salon_check["found_unique"]:
+        strength.append(f"固有視点あり: {salon_check['found_unique'][0]}")
     if review["scores"].get("信頼性", 0) >= 88:
         strength.append("「正直に言う」スタンスが一貫している")
     if review["scores"].get("専門性", 0) >= 85:
@@ -1015,9 +1117,10 @@ def _generate_ceo_challenge(record: dict, review: dict) -> dict:
         strength.append("ブランドラインを守りながら価値ある情報を届けられている")
 
     return {
-        "verdict": "YES — 投稿してください",
-        "reason":  "・".join(strength),
-        "improve": "",
+        "verdict":     "YES — 投稿してください",
+        "reason":      "・".join(strength),
+        "improve":     "",
+        "salon_check": salon_check,
     }
 
 
@@ -1418,17 +1521,48 @@ def print_creator_studio_summary(record: dict) -> None:
     # ── ⑪ CEO Challenge ──────────────────────────────────────────
     ceo = record.get("_ceo_challenge", {})
     if ceo:
-        sec("⑪", "CEO Challenge — 「森このみ本人が見たら、投稿したい！と思うか？」")
+        sec("⑪", "CEO Challenge")
+        salon_check = ceo.get("salon_check", {})
+
+        # ── Gate 1: 他サロンでも言えるか？ ─────────────────────────
+        print(f"\n  ┌─ GATE: この投稿は他サロンでも言えるか？")
+        sc_verdict = salon_check.get("verdict", "")
+        sc_icon    = "✅" if salon_check.get("is_unique") else "❌"
+        print(f"  │  {sc_icon} {sc_verdict}")
+
+        found_unique = salon_check.get("found_unique", [])
+        if found_unique:
+            print(f"  │  【固有視点の根拠】")
+            for el in found_unique[:3]:
+                print(f"  │    ・{el}")
+
+        found_generic = salon_check.get("found_generic", [])
+        if found_generic and not salon_check.get("is_unique"):
+            print(f"  │  【汎用フレーズのみ検出（固有視点に変換が必要）】")
+            print(f"  │    {' / '.join(found_generic)}")
+
+        missing_hint = salon_check.get("missing_hint", "")
+        if missing_hint:
+            print(f"  │  【固有視点の追加案】")
+            body(missing_hint, indent=4)
+
+        print(f"  └─────────────────────────────────────────────────")
+
+        # ── 総合判定 ────────────────────────────────────────────────
         verdict = ceo.get("verdict", "")
-        icon = "✅" if verdict.startswith("YES") else "❌"
+        icon    = "✅" if verdict.startswith("YES") else "❌"
         print(f"\n  {icon} {verdict}")
+
         reason = ceo.get("reason", "")
         if reason:
-            print(f"\n  【理由】")
+            print(f"\n  【根拠】")
             body(reason, indent=4)
+
         improve = ceo.get("improve", "")
         if improve:
-            print(f"\n  【改善してから投稿してください】")
+            print(f"\n  ⚠️  改善してから投稿してください")
+            print(f"  {'─'*50}")
             body(improve, indent=4)
+            print(f"  {'─'*50}")
 
     print(f"\n{THICK}\n")
