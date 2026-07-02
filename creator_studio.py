@@ -1967,11 +1967,16 @@ def print_creator_studio_summary(record: dict) -> None:
     kpi_icons = {"フォロワー": "👥", "保存": "🔖", "問い合わせ": "📩", "信頼": "🤝"}
     kpi_icon  = kpi_icons.get(kpi_key, "")
 
-    print(f"\n{THICK}")
-    print(f"  今日の撮影指示書  [{source_label}]")
-    print(f"  ━ 最優先KPI: {kpi_icon} {kpi.get('label', kpi_key)}  ━  {kpi.get('desc', '')}")
+    # Editorial Meeting がある場合は CREATOR STUDIO 見出しを省略（既出のため）
+    if not record.get("_editorial_meeting"):
+        print(f"\n{THICK}")
+        print(f"  CREATOR STUDIO")
+        print(THICK)
+
+    print(f"\n  撮影ソース: {source_label}")
+    print(f"  最優先KPI: {kpi_icon} {kpi.get('label', kpi_key)}  /  {kpi.get('desc', '')}")
     print(f"  目的: {record.get('today_mission', '')}")
-    print(THICK)
+    print(THIN)
 
     # ── ① 今日の投稿タイトル ─────────────────────────────────────────
     sec("①", "今日の投稿タイトル")

@@ -255,7 +255,7 @@ def run_editorial_meeting(today: str, past_themes: Optional[list] = None) -> dic
     )
 
     # ── 5. 採用理由付きで1案を選択 ──────────────────────────────────
-    selected, reason, warning = _select_candidate(candidates, past_themes, dow, beauty_mood)
+    selected, reason, warning, why_not = _select_candidate(candidates, past_themes, dow, beauty_mood)
 
     return {
         "date":                   today,
@@ -269,6 +269,7 @@ def run_editorial_meeting(today: str, past_themes: Optional[list] = None) -> dic
         "candidates":             candidates,
         "selected":               selected,
         "selection_reason":       reason,
+        "why_not_others":         why_not,
         "similarity_warning":     warning,
     }
 
@@ -398,8 +399,6 @@ def _select_candidate(
         )
 
     reason = (
-        f"[採用理由]\n"
-        f"・テーマ: {selected['theme']}\n"
         f"・{selected['reason']}\n"
         f"・今日（{['月','火','水','木','金','土','日'][dow]}曜日）の視聴者気分は"
         f"「{beauty_mood}」— このテーマと合致する\n"
@@ -408,7 +407,26 @@ def _select_candidate(
     if yesterday_theme:
         reason += f"\n・昨日のテーマ「{yesterday_theme}」と異なるテーマを選択"
 
-    return selected, reason, warning
+    # 非採用の理由（Why Not Others）
+    why_not = []
+    for cand in candidates:
+        if cand is selected:
+            continue
+        parts = []
+        if _is_similar(cand["theme"], yesterday_theme):
+            parts.append("昨日テーマと類似")
+        if cand["score"] < selected["score"]:
+            parts.append(f"季節スコアが低い（{cand['score']} < {selected['score']}）")
+        if cand["cta_type"] != selected["cta_type"] and dow in (0, 1, 6) and cand["cta_type"] != "フォロー":
+            parts.append("今日の曜日はフォロー型を優先")
+        if not parts:
+            parts.append("今回は優先度が低かった（次回候補）")
+        why_not.append({
+            "theme":  cand["theme"],
+            "reason": " / ".join(parts),
+        })
+
+    return selected, reason, warning, why_not
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -417,62 +435,111 @@ def _select_candidate(
 
 def print_editorial_meeting(meeting: dict) -> None:
     """Editorial Meeting の結果をターミナルに出力する。"""
-    W     = 64
-    THICK = "━" * W
-    THIN  = "─" * W
+    W    = 58
+    BAR  = "=" * W
+    THIN = "-" * W
 
-    def sec(title: str) -> None:
-        print(f"\n  {title}")
-        print(f"  {THIN}")
-
-    def body(text: str, indent: int = 4) -> None:
+    def field(label: str, value: str = "", indent: int = 0) -> None:
         pad = " " * indent
-        for line in (text or "").splitlines():
-            print(f"{pad}{line}")
+        print(f"{pad}{label}")
+        if value:
+            for line in value.splitlines():
+                print(f"{pad}  {line}")
 
-    print(f"\n{THICK}")
-    print(f"  📋 Editorial Meeting  [{meeting['date']} ({meeting['dow']}曜日)]")
-    print(f"  季節: {meeting['season']}  /  視聴者気分: {meeting['beauty_mood']}")
-    print(f"  曜日の特性: {meeting['dow_mindset']}")
-    print(THICK)
+    def blank() -> None:
+        print()
 
-    # 1. 今日の社会トレンド TOP5
-    sec("1. 今日、世の中で話題になっていること TOP5")
+    # ══ EDITORIAL MEETING ════════════════════════════════════════
+    print(f"\n{BAR}")
+    print("EDITORIAL MEETING")
+    print(BAR)
+
+    # Today's Mission
+    blank()
+    selected  = meeting["selected"]
+    kpi_label = {"フォロー": "フォロワー増加", "保存": "保存率", "問い合わせ": "問い合わせ・予約", "信頼": "信頼構築"}.get(
+        selected.get("cta_type", ""), selected.get("cta_type", "")
+    )
+    print(f"Today's Mission")
+    print(f"  {kpi_label}  /  {meeting['dow']}曜日  /  {meeting['season']}")
+    print(f"  {meeting['dow_mindset']}")
+
+    # Society Intelligence
+    blank()
+    print(THIN)
+    print("Society Intelligence")
+    print(f"  （SNS・ニュース・検索・季節 — {meeting['date']}時点の推定）")
+    print(THIN)
     for sig in meeting["society_signals"]:
-        print(f"    {sig['rank']}. {sig['topic']}")
-        print(f"       → 出典: {sig['source']}")
-
-    # 2. CORE HARIとの接点
-    sec("2. CORE HARIと接点があるテーマ")
+        print(f"  {sig['rank']}. {sig['topic']}")
     conns = meeting["core_hari_connections"]
     if conns:
+        blank()
+        print("  CORE HARIとの接点:")
         for c in conns:
-            print(f"    ・社会トレンド 「{c['society_topic']}」")
-            print(f"      → CORE HARI視点: {c['core_hari_theme']}")
-    else:
-        print("    （接点なし — デフォルトテーマで対応）")
+            print(f"    ・「{c['society_topic']}」→ {c['core_hari_theme']}")
 
-    # 3. フォロワーが今知りたいこと
-    sec("3. フォロワーが今知りたいこと")
+    # Trend Summary TOP5
+    blank()
+    print(THIN)
+    print("Trend Summary  TOP5")
+    print(THIN)
     for i, w in enumerate(meeting["follower_wants"], 1):
-        print(f"    {i}. {w}")
+        print(f"  {i}. {w}")
 
-    # 4. 投稿候補5案
-    sec("4. 今日作るべき投稿候補 5案")
+    # Candidate Topics TOP5
+    blank()
+    print(THIN)
+    print("Candidate Topics  TOP5")
+    print(THIN)
     for cand in meeting["candidates"]:
-        selected_mark = "  ★ 採用 " if cand == meeting["selected"] else f"  案{cand['no']}    "
-        print(f"\n  {selected_mark} 【{cand['theme']}】")
-        print(f"      Hook候補: 「{cand['hook_seed']}」")
-        print(f"      CTA型   : {cand['cta_type']}")
-        print(f"      選定理由: {cand['reason']}")
+        mark = "★" if cand is selected else " "
+        print(f"  {mark} {cand['no']}. {cand['theme']}")
+        print(f"       Hook: 「{cand['hook_seed'][:40]}…」")
+        print(f"       CTA : {cand['cta_type']}")
 
-    # 5. 採用理由
-    sec("5. 採用した理由")
-    body(meeting["selection_reason"])
+    # Selected Topic
+    blank()
+    print(THIN)
+    print("Selected Topic")
+    print(THIN)
+    print(f"  {selected['theme']}")
+    print(f"  Hook候補: 「{selected['hook_seed']}」")
+    print(f"  CTA     : {selected['cta_type']}型")
+
+    # Why Today?
+    blank()
+    print(THIN)
+    print("Why Today?")
+    print(THIN)
+    for line in meeting["selection_reason"].splitlines():
+        print(f"  {line}")
+
+    # Why Not Others?
+    blank()
+    print(THIN)
+    print("Why Not Others?")
+    print(THIN)
+    for item in meeting.get("why_not_others", []):
+        print(f"  ✕ {item['theme'][:32]}")
+        print(f"    → {item['reason']}")
 
     # 類似警告
-    if meeting["similarity_warning"]:
-        print(f"\n  ⚠️  類似警告:")
-        body(meeting["similarity_warning"])
+    if meeting.get("similarity_warning"):
+        blank()
+        print(f"  ⚠  {meeting['similarity_warning']}")
 
-    print(f"\n{THICK}\n")
+    # Follower Goal
+    blank()
+    print(THIN)
+    print("Follower Goal")
+    print(THIN)
+    print(f"  Primary KPI : {kpi_label}")
+    print(f"  視聴者の悩み: {meeting['follower_wants'][0]}")
+    print(f"  今月の気分  : {meeting['beauty_mood']}")
+
+    blank()
+    print(BAR)
+    print("CREATOR STUDIO")
+    print(BAR)
+    blank()
