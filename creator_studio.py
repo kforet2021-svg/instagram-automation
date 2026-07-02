@@ -2247,98 +2247,251 @@ def _priority4(today: str) -> dict:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Persona-First ブリーフ — 「この人に話しかける」5ステップ
+#
+# テーマから作る投稿は禁止。
+# 必ず「ターゲット人物 → 悩み → 最初の質問 → 専門家が見るもの → 理由」の順で組み立てる。
+# ────────────────────────────────────────────────────────────────────────────
+
+def _derive_persona_brief(em_theme: str, thought: Optional[dict]) -> dict:
+    """
+    Editorial Meeting のテーマと Thought Library エントリから
+    「この人に話しかける」ための 5ステップブリーフを生成する。
+
+    戻り値:
+        target_person  : 話しかける相手（どんな人か）
+        their_problem  : その人の具体的な悩み
+        first_question : 専門家が最初に聞く質問 ← これがフック（Audience Stop）
+        expert_sees    : 専門家が何を観察・診断するか
+        why_thinks     : なぜそう考えるか（理由・根拠）
+    """
+    content      = (thought or {}).get("content", "")
+    speaker      = (thought or {}).get("speaker_words", "")
+    topic        = (thought or {}).get("topic", em_theme)
+    ktype        = (thought or {}).get("knowledge_type", "")
+
+    speaker_lines = [l.strip() for l in speaker.split("\n") if l.strip()]
+
+    # ── ターゲット人物：短く「誰に話しかけるか」を一文で表現 ──────────
+    # speaker_words の「〜に悩む方へ」「〜という方」パターンを短く抜き出す
+    target = ""
+    for line in speaker_lines[:3]:
+        # 「〜方へ」「〜方。」など短い宛先フレーズを探す
+        if ("方へ" in line or "方。" in line) and len(line) <= 30:
+            target = line
+            break
+    if not target:
+        # テーマから「どんな人か」を1行で表現
+        # 「〜したい」「〜が気になる」形のテーマなら悩みをそのまま使う
+        target = f"「{topic}」に悩んでいる方"
+
+    # ── 悩みの具体化：ターゲットが感じている状況・感覚 ──────────────
+    # speaker_words の最初の行（専門家が「あなたのことですね」と言う場面）
+    problem = speaker_lines[0] if speaker_lines else f"{topic}について悩んでいる"
+
+    # ── 最初に聞く質問：これがフック（Audience Stop）になる ──────────
+    # 専門家が「えっ、それ聞く？」と思わせる最初の問いかけ
+    # 疑問形の行を探す
+    first_q = ""
+    for line in speaker_lines:
+        if "？" in line:
+            first_q = line
+            break
+    if not first_q:
+        # content から疑問文を生成できないか試みる
+        # 「〜が原因」→「〜のクセ、ありますか？」のパターン
+        cause_words = ["咬筋", "食いしばり", "姿勢", "表情グセ", "舌の位置", "片側噛み"]
+        found_cause = next((w for w in cause_words if w in content), "")
+        if found_cause:
+            first_q = f"「{found_cause}」のクセ、気になったことありますか？"
+        else:
+            first_q = f"「{topic}」について、正直に聞いてもいいですか？"
+
+    # ── 専門家が何を見るか：診断・観察視点 ──────────────────────────
+    expert_sees = ""
+    # content の最初の文が専門家の「見立て」になることが多い
+    content_sentences = [s.strip() for s in content.replace("。", "。\n").split("\n") if s.strip()]
+    if content_sentences:
+        expert_sees = content_sentences[0]
+    if not expert_sees and len(speaker_lines) > 2:
+        expert_sees = speaker_lines[2]
+
+    # ── なぜそう考えるか：因果・根拠 ────────────────────────────────
+    why = ""
+    for sent in content_sentences[1:]:
+        if any(w in sent for w in ["なぜ", "から", "ため", "理由", "のは", "つながる", "影響"]):
+            why = sent
+            break
+    if not why and len(content_sentences) > 1:
+        why = content_sentences[-1]
+    if not why and len(speaker_lines) > 3:
+        # speaker_words の後半に理由が書かれていることが多い
+        for line in speaker_lines[2:]:
+            if any(w in line for w in ["なぜなら", "だから", "理由は", "から来て", "から生まれ"]):
+                why = line
+                break
+
+    return {
+        "target_person":  target,
+        "their_problem":  problem,
+        "first_question": first_q,
+        "expert_sees":    expert_sees,
+        "why_thinks":     why,
+    }
+
+
+def _script_from_persona_brief(brief: dict, cta_str: str, speaker_words: str = "") -> str:
+    """
+    Persona-First ブリーフから「この人に話しかける」スクリプトを組み立てる。
+
+    構造:
+      [Hook]          first_question（最初の3秒で止める）
+      [共感]          their_problem を代弁する
+      [Expert Sees]   専門家が何を見るか
+      [Why Thinks]    なぜそう考えるか
+      [CTA]           保存/フォロー/問い合わせ
+    """
+    # speaker_words がある場合はそちらを優先（専門家の生の言葉）
+    if speaker_words.strip():
+        lines = [l for l in speaker_words.split("\n") if l.strip()]
+        # CTA が含まれていなければ追加
+        combined = "\n".join(lines)
+        if cta_str and cta_str[:8] not in combined:
+            lines.append("")
+            lines.append(cta_str)
+        return "\n".join(lines)
+
+    # ── speaker_words がない場合はブリーフから組み立てる ─────────────
+    parts = []
+
+    fq = brief.get("first_question", "")
+    if fq:
+        parts.append(fq)
+        parts.append("")
+
+    prob = brief.get("their_problem", "")
+    if prob and prob != fq:
+        parts.append(prob)
+        parts.append("")
+
+    sees = brief.get("expert_sees", "")
+    if sees:
+        parts.append(sees)
+
+    why = brief.get("why_thinks", "")
+    if why and why != sees:
+        parts.append(why)
+        parts.append("")
+
+    if cta_str:
+        parts.append(cta_str)
+
+    return "\n".join(parts).strip()
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Priority0: Editorial Meeting の Selected Topic から直接ブリーフ生成
 # ────────────────────────────────────────────────────────────────────────────
 
 def _build_from_meeting_topic(today: str, meeting: dict) -> Optional[dict]:
     """
-    Editorial Meeting の selected（採用されたテーマ）を唯一の情報源として
-    Hook / 台本 / 撮影 / CTA を組み立てる。
+    Editorial Meeting の selected（採用されたテーマ）を入口として
+    Persona-First フロー（5ステップ）で「この人に話しかける」投稿を組み立てる。
 
-    1. selected["theme"] と一致する DNA テンプレートがあればその構造を再利用し、
-       theme / hook / hook_text を selected の内容で上書きする。
-    2. 一致テンプレートがなければ selected["hook_seed"] + ["core_hari_perspective"]
-       + ["cta_type"] だけで必要最小限のテンプレートを組み立てる。
+    テーマから直接投稿を作ることは禁止。
+    必ず「ターゲット人物 → 悩み → 最初の質問 → 専門家が見るもの → 理由」の順で組み立てる。
+
+    フロー:
+      1. Editorial Meeting Selected Topic → テーマを確定
+      2. Thought Library 検索 → テーマに最も近い専門家の思考エントリを取得
+      3. Persona Brief 生成 → 5ステップブリーフを組み立てる
+      4. スクリプト生成 → 「この人に話しかける」形式の台本を作る
     """
     selected = meeting.get("selected")
     if not selected:
         return None
 
-    em_theme     = selected.get("theme", "").strip()
-    hook_seed    = selected.get("hook_seed", "").strip()
-    perspective  = selected.get("core_hari_perspective", "").strip()
-    cta_type     = selected.get("cta_type", "保存")
+    em_theme  = selected.get("theme", "").strip()
+    cta_type  = selected.get("cta_type", "保存")
     if not em_theme:
         return None
 
-    # CTA 文字列に変換
     cta_map = {"保存": _CTA_SAVE, "フォロー": _CTA_FOLLOW, "問い合わせ": _CTA_DM}
     cta_str = cta_map.get(cta_type, _CTA_SAVE)
 
-    # ── DNA テンプレートと照合（部分一致）
-    matched_tmpl = None
-    for tmpl in _DNA_TEMPLATES:
-        t_theme = tmpl.get("theme", "")
-        # 双方向の包含チェック（「施術回数」↔「タイムライン」等のゆらぎに対応）
-        key_words = [w for w in em_theme.replace("—", " ").split() if len(w) >= 3]
-        if any(w in t_theme for w in key_words) or any(w in em_theme for w in t_theme.replace("—", " ").split() if len(w) >= 3):
-            matched_tmpl = tmpl
-            break
-
-    # ── Thought Library から台本を組み立てる ─────────────────────────
-    thoughts = _find_thoughts(em_theme)
+    # ── Step1: Thought Library で最も近い専門家の思考を取得 ────────────
+    thoughts       = _find_thoughts(em_theme)
     primary_thought = thoughts[0] if thoughts else None
 
+    # ── Step2: Persona Brief を生成（5ステップ）──────────────────────
+    brief = _derive_persona_brief(em_theme, primary_thought)
+
+    # ── Step3: 「この人に話しかける」スクリプトを組み立てる ────────────
+    speaker_words = (primary_thought or {}).get("speaker_words", "")
+    script_body   = _script_from_persona_brief(brief, cta_str, speaker_words)
+
+    # フック = 「最初に聞く質問」（Audience Stop の核）
+    actual_hook = brief["first_question"]
+
     if primary_thought:
-        # Thought Library にエントリあり → 「森このみが話しそう」な台本を構築
-        script_body = _build_script_from_thought(primary_thought, hook_seed, cta_str)
-        actual_hook = primary_thought["spoken"][0] if primary_thought.get("spoken") else hook_seed
         source = "thought_library"
-        print(f"  Creator Studio: Priority0（Thought Library: {primary_thought['topic']}）")
-    elif matched_tmpl:
-        # Thought Library にないが DNA テンプレートがある → DNA の script を使用
-        script_body = matched_tmpl.get("script_full", perspective or f"（{em_theme}について話します。）")
-        actual_hook = hook_seed
-        source = "editorial_meeting+dna"
-        print(f"  Creator Studio: Priority0（Editorial Meeting → DNA構造流用: {em_theme[:30]}）")
+        print(f"  Creator Studio: Priority0（Persona-First ← Thought Library: {primary_thought['topic']}）")
     else:
-        # フォールバック → hook_seed + perspective から最小限構築
-        script_body = f"{hook_seed}\n\n{perspective}" if perspective else hook_seed
-        actual_hook = hook_seed
         source = "editorial_meeting"
-        print(f"  Creator Studio: Priority0（Editorial Meeting → 直接生成: {em_theme[:30]}）")
+        print(f"  Creator Studio: Priority0（Persona-First ← テーマ直接: {em_theme[:30]}）")
 
-    # ── 撮影カット指示の組み立て ─────────────────────────────────────
-    spoken_lines = (primary_thought or {}).get("spoken", [])
-    shot_parts   = ["【カット1 / 2秒】フック用・静止カット\n  ★ テロップ: テーマを1行で表示"]
-    for i, line in enumerate(spoken_lines[:3], start=2):
-        shot_parts.append(f"【カット{i} / 10秒】カメラ目線\n  セリフ:「{line}」")
-    if not spoken_lines:
-        shot_parts.append(f"【カット2 / 15秒】カメラ目線\n  セリフ:「{actual_hook}」")
-    cta_spoken = (primary_thought or {}).get("cta_spoken", "") or cta_str
-    shot_parts.append(f"【カット{len(shot_parts)+1} / 5秒】笑顔・CTA\n  セリフ:「{cta_spoken}」")
+    # ── Step4: 撮影カット指示（Persona-First 構造）──────────────────
+    shot_parts = [
+        f"【カット1 / 2秒】フック・静止\n"
+        f"  ★ テロップ:「{brief['first_question'][:30]}」\n"
+        f"  ← Audience Stop。スクロールを止める最初の問いかけ",
 
+        f"【カット2 / 8秒】カメラ目線（共感）\n"
+        f"  セリフ:「{brief['their_problem']}」\n"
+        f"  ← ターゲットの悩みをそのまま代弁する",
+
+        f"【カット3 / 10秒】カメラ目線（診断）\n"
+        f"  セリフ:「{brief['expert_sees']}」\n"
+        f"  ← 専門家が見ているものを開示する",
+
+        f"【カット4 / 10秒】カメラ目線（理由）\n"
+        f"  セリフ:「{brief['why_thinks']}」\n"
+        f"  ← なぜそう考えるかを因果で説明する",
+
+        f"【カット5 / 5秒】笑顔・CTA\n"
+        f"  セリフ:「{cta_str[:40]}」",
+    ]
     cut_count = len(shot_parts)
-    total_sec = cut_count * 9
+    total_sec = cut_count * 7
 
     # ── キャプション ──────────────────────────────────────────────────
-    cap_lines = [em_theme, ""]
-    if primary_thought:
-        cap_lines.append(primary_thought.get("fact", "")[:100])
-        cap_lines.append("")
-        cap_lines.append(primary_thought.get("core_hari_view", "")[:100])
-        cap_lines.append("")
-    cap_lines.append("保存して、気になったときに読み返してください。")
-    cap_lines.append("")
-    cap_lines.append("#小顔矯正 #フェイシャルエステ #札幌エステ #たるみ改善 #顔筋トレーニング #COREHARI")
-    caption = "\n".join(l for l in cap_lines if l is not None)
+    cap_parts = [
+        brief["first_question"],
+        "",
+        brief["their_problem"],
+        "",
+        brief["expert_sees"],
+        "",
+        brief["why_thinks"],
+        "",
+        cta_str,
+        "",
+    ]
+    # Vertical のタグを追加（brand_rules から取得できるなら）
+    try:
+        tags = _BRAND.cta_follow.split("#", 1)[-1] if "#" in _BRAND.cta_follow else ""
+        if tags:
+            cap_parts.append("#" + tags)
+    except Exception:
+        pass
+    caption = "\n".join(p for p in cap_parts if p is not None)
 
     tmpl = {
         "theme":         em_theme,
         "mission":       {"保存": "保存を狙う", "フォロー": "フォロワーを増やす",
                           "問い合わせ": "問い合わせを増やす"}.get(cta_type, "保存を狙う"),
         "hook":          actual_hook,
-        "hook_text":     em_theme.split("—")[0].strip(),
+        "hook_text":     brief["first_question"][:35],
         "script_full":   script_body,
         "shot_sequence": "\n\n".join(shot_parts),
         "editing_notes": _build_editing_notes(total_sec, cut_count),
@@ -2347,11 +2500,14 @@ def _build_from_meeting_topic(today: str, meeting: dict) -> Optional[dict]:
         "threads_text":  f"{actual_hook}\n\n{script_body[:120]}",
         "cut_count":     cut_count,
         "total_sec":     total_sec,
+        # Persona Brief を record に格納（表示・デバッグ用）
+        "_persona_brief": brief,
     }
 
     why = (
         f"Editorial Meetingで「{em_theme}」が採用されました。\n"
-        f"採用理由: {meeting.get('selection_reason', '')}"
+        f"採用理由: {meeting.get('selection_reason', '')}\n"
+        f"Persona-First: {brief['target_person']}"
     )
     return _assemble(today, source, "", tmpl, why)
 
@@ -2503,6 +2659,25 @@ def print_creator_studio_summary(record: dict) -> None:
     sec("②", "このテーマを選んだ理由")
     body(record.get("why_today", ""))
 
+    # ── ② Persona Brief（5ステップ思考）────────────────────────────
+    brief = record.get("_persona_brief", {})
+    if brief:
+        print(f"\n{THIN}")
+        print("  ▼ Persona-First — 「この人に話しかける」5ステップ")
+        print(THIN)
+        steps = [
+            ("ターゲット人物",       brief.get("target_person", "")),
+            ("その人の悩み",         brief.get("their_problem", "")),
+            ("最初に聞く質問 ★Hook", brief.get("first_question", "")),
+            ("専門家が何を見るか",   brief.get("expert_sees", "")),
+            ("なぜそう考えるか",     brief.get("why_thinks", "")),
+        ]
+        for label, value in steps:
+            print(f"\n  【{label}】")
+            for line in (value or "").splitlines():
+                print(f"    {line}")
+        print()
+
     # ── ③ Hook（0〜3秒）─────────────────────────────────────────────
     sec("③", "Hook（0〜3秒）")
     hook_text = record.get("script_15_30s", "")  # テロップ
@@ -2563,21 +2738,31 @@ def print_creator_studio_summary(record: dict) -> None:
             print(f"\n  【推奨理由】")
             body(rec_reason, indent=4)
 
-    # ── ⑩ Creator Review（自己採点）────────────────────────────────
+    # ── ⑩ Creator Review（7スコア評価）────────────────────────────
     review = record.get("_creator_review", {})
     if review:
-        sec("⑩", "Creator Review — 10項目自己採点")
+        sec("⑩", "Creator Review — 7スコア評価")
         scores = review.get("scores", {})
         avg = review.get("average", 0)
         print()
         items_order = [
-            "フック", "専門性", "独自性", "保存されやすさ",
-            "共感", "信頼性", "ブランドらしさ", "撮影しやすさ", "編集しやすさ", "CTA"
+            "Audience Stop", "Curiosity", "Emotional Hook",
+            "Save Value", "Follow Value", "Expert Thinking", "Brand",
         ]
+        labels = {
+            "Audience Stop":   "① Audience Stop  最初の3秒で止まるか",
+            "Curiosity":       "② Curiosity      続きを見たくなるか",
+            "Emotional Hook":  "③ Emotional Hook 自分のことだと思うか",
+            "Save Value":      "④ Save Value     保存したくなるか",
+            "Follow Value":    "⑤ Follow Value   フォローしたくなるか",
+            "Expert Thinking": "⑥ Expert Thinking専門家の思考が見えるか",
+            "Brand":           "⑦ Brand          ブランドラインを守っているか",
+        }
         for item in items_order:
-            sc = scores.get(item, 0)
+            sc  = scores.get(item, 0)
             bar = "■" * (sc // 10) + "□" * (10 - sc // 10)
-            print(f"  {item:<10s}: {bar} {sc}点")
+            flag = " ← 要改善" if item == "Audience Stop" and sc < 80 else ""
+            print(f"  {labels[item]}: {bar} {sc}点{flag}")
         print(f"\n  {'─'*40}")
         print(f"  総合平均: {avg}点 / 100点")
         print(f"\n  【改善点 TOP3】")
