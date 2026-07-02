@@ -10,6 +10,7 @@ creator_studio.py
 【2026-07-02(4回目): ⑫Follower Growth Check追加 — 最優先KPI（フォロワーが増える投稿か？）4項目判定】
 【2026-07-02(5回目): ⑬Audience Thinking追加 — 視聴者の頭の中を5項目で分析・施術者目線チェック】
 【2026-07-02(6回目): KPI設計追加 — フォロワー/保存/問い合わせ/信頼を最初に選択・Follower Score(100点)追加・80点未満は再生成促進】
+【2026-07-02(7回目): Follower Intelligence全面刷新 — 5ステップ生成フロー＋5ゲート品質チェック＋4スコア自己採点。「情報提供」から「考え方・視点・シリーズ設計」へ転換】
 
 目的：Creator Studioを開いたら5分以内に撮影を開始できる状態を作る。
       分析結果の表示ではなく、今日そのまま使える撮影指示書として出力する。
@@ -1204,107 +1205,129 @@ _FG_CURIOSITY_HOOKS = ["実は", "正直に言います", "本当は", "と思�
 _FG_FOLLOW_REASON_MARKERS = ["フォローすると", "フォローして", "フォローすれば"]
 
 
-def _check_follower_growth(record: dict) -> dict:
+def _build_follower_flow(record: dict) -> dict:
     """
-    Follower Growth Check — 4項目すべてYESが合格条件。
+    ① Follower Goal → ② Audience Emotion → ③ Hook分析
+    → ④ CORE HARI Perspective → ⑤ Series Thinking
 
-    ① フォロー価値（役に立ちそう）
-    ② 続きが気になる
-    ③ この人にしか聞けない
-    ④ フォローする理由が明確
-
-    判定ロジック:
-    ① 専門マーカーが1件以上 → YES
-    ② シリーズ明示 OR 好奇心フックが2件以上 → YES
-    ③ _CORE_HARI_UNIQUE_MARKERS のいずれかを含む → YES（他サロンチェックと共通）
-    ④ 明示フォローCTA がある OR 専門マーカーが2件以上（暗黙の価値提示） → YES
-       ※ 保存CTA・問い合わせCTA 投稿でも、専門性で価値が伝わればYES
+    投稿を「情報提供」ではなく「フォロワーが増える構造」で評価するための
+    5ステップフロー。OpenAIコストゼロ・ルールベース。
     """
-    combined = " ".join([
-        record.get("hook", ""),
-        record.get("script_full", ""),
-        record.get("caption", ""),
-        record.get("cta", ""),
-        record.get("threads_text", ""),
-    ])
+    hook   = record.get("hook", "")
+    script = record.get("script_full", "")
+    cta    = record.get("cta", "")
+    theme  = record.get("theme", "")
+    combined = f"{hook} {script} {cta}"
 
-    useful_count     = sum(1 for m in _FG_USEFUL_MARKERS if m in combined)
-    unique_count     = sum(1 for m in _CORE_HARI_UNIQUE_MARKERS if m in combined)
-    curiosity_count  = sum(1 for m in _FG_CURIOSITY_HOOKS if m in combined)
-    has_series       = any(m in combined for m in _FG_SERIES_MARKERS)
-    has_follow_cta   = any(m in combined for m in _FG_FOLLOW_REASON_MARKERS)
+    # ── ① Follower Goal: なぜこの人をフォローしたくなるか ───────────
+    goal_signals = []
+    if any(m in combined for m in ["毎週", "シリーズ", "続き", "次回", "定期"]):
+        goal_signals.append("毎週新しい情報が得られる約束がある")
+    if any(m in combined for m in _CORE_HARI_UNIQUE_MARKERS):
+        goal_signals.append("この人だけが持つ視点・知識がある")
+    if any(m in combined for m in ["正直に言います", "本当は", "実は"]):
+        goal_signals.append("他では言わない正直な情報を持っている")
+    if any(m in combined for m in ["悩み", "気になる", "不安", "左右差", "老け"]):
+        goal_signals.append("自分の悩みを理解してくれる人として記憶される")
+    follower_goal = goal_signals[0] if goal_signals else "（フォロー動機が不明確 — 再設計が必要）"
 
-    q1 = useful_count >= 1
-    q2 = has_series or curiosity_count >= 2
-    q3 = unique_count >= 1
-    q4 = has_follow_cta or useful_count >= 2   # 保存CTA投稿でも専門性≥2で暗黙にYES
+    # ── ② Audience Emotion: 視聴者の悩み・知りたいこと・信じていること ─
+    worry_markers    = ["老け", "たるみ", "むくみ", "左右差", "骨格", "何回", "変わらない",
+                        "小顔", "フェイスライン", "気になる", "不安", "自信がない"]
+    want_markers     = ["方法", "理由", "仕組み", "なぜ", "どうして", "何をする",
+                        "正直に", "実は", "本当は", "タイムライン", "変わります"]
+    belief_markers   = ["骨格だから", "生まれつき", "変わらない", "遺伝", "もう無理",
+                        "エステは高い", "続けないと"]
 
-    # NO の場合の改善アドバイス（具体的・行動可能な形で）
-    advice = {}
-    if not q1:
-        advice["①"] = (
-            "専門知識が見当たりません。\n"
-            "咬筋・表情グセ・舌の位置・「正直に言います」スタンスのいずれかを入れてください。"
-        )
-    if not q2:
-        advice["②"] = (
-            "「続きが気になる」構造がありません。\n"
-            "・「フォローすると毎週こういう情報を届けます」を台本の最後に入れる\n"
-            "・または「実は」「正直に言います」など好奇心フックを2か所以上入れる"
-        )
-    if not q3:
-        advice["③"] = (
-            "「この人にしか聞けない」視点がありません。\n"
-            "咬筋優位・舌の位置・表情グセ・「骨格の大きさは変わりません。正直に言います。」\n"
-            "など、CORE HARIだけが持つ切り口を1つ以上入れてください。"
-        )
-    if not q4:
-        advice["④"] = (
-            "フォローする理由が見えません。\n"
-            "・「フォローすると、毎週顔のセルフケア情報をお届けします」を明示する\n"
-            "・または専門用語を2件以上使って「この人は知識がある」を示す"
-        )
+    worry  = [m for m in worry_markers  if m in combined]
+    want   = [m for m in want_markers   if m in combined]
+    belief = [m for m in belief_markers if m in combined]
 
-    all_yes   = q1 and q2 and q3 and q4
-    items = {
-        "①役に立ちそう":           q1,
-        "②続きが気になる":          q2,
-        "③この人にしか聞けない":    q3,
-        "④フォローする理由が明確":  q4,
-    }
+    audience_worry  = f"「{'・'.join(worry[:3])}」への悩み" if worry  else "（視聴者の悩みが見えない）"
+    audience_want   = f"「{'・'.join(want[:3])}」を知りたい" if want   else "（知りたいことが不明）"
+    audience_belief = f"「{'・'.join(belief[:2])}」という先入観" if belief else "（先入観への言及なし）"
+
+    # ── ③ Hook分析: 悩みから始まっているか・施術者目線になっていないか ─
+    hook_line1 = hook.strip().split("\n")[0].strip()
+    practitioner_starts = ["施術は", "CORE HARI", "私たちは", "私が", "私は",
+                           "当サロン", "施術では", "施術の", "私たちの"]
+    quoted = hook_line1.startswith("「") or hook_line1.startswith("『")
+    is_pov_ng = not quoted and any(hook_line1.startswith(p) for p in practitioner_starts)
+
+    viewer_starts = ["「", "？", "悩", "老け", "左右差", "むくみ", "何回", "骨格",
+                     "自信", "気になる", "不安", "変わら"]
+    hook_from_viewer = any(hook.startswith(v) or hook_line1.startswith(v)
+                           for v in viewer_starts)
+
+    # ── ④ CORE HARI Perspective: 他サロンではなくCORE HARIだから言えること ─
+    found_unique = [(m, d) for m, d in _CORE_HARI_UNIQUE_MARKERS.items() if m in combined]
+    if found_unique:
+        ch_perspective = f"「{found_unique[0][0]}」— {found_unique[0][1][:30]}..."
+        ch_count = len(found_unique)
+    else:
+        ch_perspective = "（CORE HARI固有視点なし — 他サロンでも言える内容）"
+        ch_count = 0
+
+    # ── ⑤ Series Thinking: 続きが見たくなる構造・次回予告 ─────────────
+    next_ep_markers = ["次回", "次は", "Part", "第", "シリーズ", "#1", "①", "②", "③"]
+    has_next_ep     = any(m in combined for m in next_ep_markers)
+    has_series_promise = any(m in combined for m in ["フォローすると", "毎週"])
+
+    if has_next_ep:
+        series_status = "次回予告あり — シリーズの1話目として機能する"
+    elif has_series_promise:
+        series_status = "シリーズ約束あり（「フォローすると毎週」）— 続きへの期待を作れる"
+    else:
+        series_status = "（シリーズ設計なし — 単発投稿になっている）"
 
     return {
-        "all_yes": all_yes,
-        "items":   items,
-        "advice":  advice,
-        # デバッグ用カウント
-        "_useful_count":    useful_count,
-        "_unique_count":    unique_count,
-        "_curiosity_count": curiosity_count,
-        "_has_series":      has_series,
-        "_has_follow_cta":  has_follow_cta,
+        "follower_goal":     follower_goal,
+        "audience_worry":    audience_worry,
+        "audience_want":     audience_want,
+        "audience_belief":   audience_belief,
+        "hook_from_viewer":  hook_from_viewer,
+        "is_pov_ng":         is_pov_ng,
+        "ch_perspective":    ch_perspective,
+        "ch_count":          ch_count,
+        "series_status":     series_status,
+        "has_next_ep":       has_next_ep,
+        "has_series_promise": has_series_promise,
+        # デバッグ用カウント（後段スコア計算で使用）
+        "_unique_count":    ch_count,
+        "_has_series":      has_next_ep or has_series_promise,
+        "_has_follow_cta":  any(m in combined for m in _FG_FOLLOW_REASON_MARKERS),
+        "_useful_count":    sum(1 for m in _FG_USEFUL_MARKERS if m in combined),
+        "_curiosity_count": sum(1 for m in _FG_CURIOSITY_HOOKS if m in combined),
     }
 
 
-def _compute_follower_score(record: dict, fg: dict) -> dict:
-    """
-    Follower Score — フォロワー増加投稿の品質を100点満点で自己採点。
+# ── Quality Gate マーカー ──────────────────────────────────────────────────
 
-    採点基準:
-      A. 続きも見たい感（30点）
-         - シリーズ明示あり              +15pt
-         - 好奇心フックが2件以上         +15pt
-         - 好奇心フックが1件のみ         + 8pt
-      B. この人しか言わない視点（30点）
-         - CORE HARI固有マーカー2件以上  +30pt
-         - CORE HARI固有マーカー1件のみ  +18pt
-      C. 専門家として記憶に残る（25点）
-         - 専門マーカー3件以上           +25pt
-         - 専門マーカー2件               +18pt
-         - 専門マーカー1件               +10pt
-      D. シリーズ化できるテーマ（15点）
-         - フォローCTA明示               +15pt
-         - 毎週・定期的ワード            + 8pt
+# Gate④: 「知識」ではなく「考え方」を伝えているか
+_PERSPECTIVE_MARKERS = [
+    "だから", "なぜなら", "理由は", "考え方は", "本質は", "視点は",
+    "正直に言います", "実は", "本当は", "構造的に", "根本は",
+    "そういうことです", "というのは", "から来ています",
+]
+
+# Gate③: シリーズ1話目マーカー
+_SERIES_EP1_MARKERS = [
+    "次回", "次は", "Part", "第", "シリーズ", "#1", "①", "②",
+    "フォローすると", "毎週",
+]
+
+
+def _check_quality_gates(record: dict, flow: dict) -> dict:
+    """
+    フォロワーが増える投稿の5ゲート品質チェック。
+
+    Gate①: 他サロンでも投稿できる内容か？     YES → NG（再生成）
+    Gate②: フォローしたくなる理由があるか？    NO  → NG（再生成）
+    Gate③: シリーズ1話目になっているか？       NO  → NG（再生成）
+    Gate④: 「知識」ではなく「考え方」を伝えているか？  NO → NG（再生成）
+    Gate⑤: 「この人にしか聞けない」と思えるか？ NO  → NG（再生成）
+
+    all_pass = 全ゲートが通過 = 投稿OK
     """
     combined = " ".join([
         record.get("hook", ""),
@@ -1313,84 +1336,168 @@ def _compute_follower_score(record: dict, fg: dict) -> dict:
         record.get("caption", ""),
     ])
 
-    useful_count    = fg.get("_useful_count", 0)
-    unique_count    = fg.get("_unique_count", 0)
-    curiosity_count = fg.get("_curiosity_count", 0)
-    has_series      = fg.get("_has_series", False)
-    has_follow_cta  = fg.get("_has_follow_cta", False)
+    # Gate①: 他サロンでも言えるか？（NOであるべき = CORE HARI固有視点あり）
+    salon_ok = flow["_unique_count"] >= 1   # 固有視点が1件以上あれば他サロンでは言えない
+    g1_pass  = salon_ok
+    g1_advice = (
+        "CORE HARIだから言える視点がありません。\n"
+        "咬筋優位・舌の位置・表情グセ・「骨格の大きさは変わりません。正直に言います。」\n"
+        "など、CORE HARIだけの切り口を1つ以上入れてください。"
+    ) if not g1_pass else ""
 
-    # A. 続きも見たい感（30点）
-    if has_series and curiosity_count >= 2:
-        score_a = 30
-    elif has_series or curiosity_count >= 2:
-        score_a = 20
-    elif curiosity_count == 1:
-        score_a = 12
-    else:
-        score_a = 0
+    # Gate②: フォローしたくなる理由があるか？
+    has_follow_reason = (
+        flow["_has_follow_cta"]
+        or flow["_has_series"]
+        or flow["_unique_count"] >= 2
+        or (flow["_unique_count"] >= 1 and flow["_curiosity_count"] >= 1)
+    )
+    g2_pass  = has_follow_reason
+    g2_advice = (
+        "フォローしたくなる理由が見当たりません。\n"
+        "以下のいずれかを入れてください:\n"
+        "・「フォローすると、毎週こういう情報を届けます。」（シリーズ約束）\n"
+        "・CORE HARI固有の視点 × 好奇心フック（「実は〜」「正直に言います」）の組み合わせ"
+    ) if not g2_pass else ""
 
-    # B. この人しか言わない視点（30点）
-    if unique_count >= 2:
-        score_b = 30
+    # Gate③: シリーズ1話目になっているか？
+    has_series_design = any(m in combined for m in _SERIES_EP1_MARKERS)
+    g3_pass  = has_series_design
+    g3_advice = (
+        "シリーズ設計がありません。視聴者に「続きも見たい」と思わせる仕掛けが必要です。\n"
+        "・script_fullの末尾に「フォローすると、毎週こういう情報を届けます。」を追加\n"
+        "・または「次回は〜をお話しします。」など次回予告を入れる"
+    ) if not g3_pass else ""
+
+    # Gate④: 知識ではなく考え方を伝えているか？
+    perspective_count = sum(1 for m in _PERSPECTIVE_MARKERS if m in combined)
+    g4_pass  = perspective_count >= 2
+    g4_advice = (
+        f"「考え方」ではなく「情報提供」になっています（視点マーカー {perspective_count}件）。\n"
+        "「なぜ〜なのか」「〜だから、顔が変わる」「本質は〜にある」など\n"
+        "CORE HARIの視点・解釈を入れてください。\n"
+        "例: 「咬筋優位だから、左右差が出る。だから骨格矯正では変わらない。」"
+    ) if not g4_pass else ""
+
+    # Gate⑤: この人にしか聞けないと思えるか？
+    g5_pass  = flow["_unique_count"] >= 1 and flow["_useful_count"] >= 1
+    g5_advice = (
+        "「この人にしか聞けない」という印象を作れていません。\n"
+        "CORE HARI固有マーカー（咬筋優位・表情グセ・舌の位置など）を1件以上 +\n"
+        "専門マーカー（咬筋・表情筋・リンパ・骨格など）を1件以上、組み合わせてください。"
+    ) if not g5_pass else ""
+
+    gates = {
+        "①他サロンでも言えない内容か":         g1_pass,
+        "②フォローしたくなる理由がある":        g2_pass,
+        "③シリーズ1話目として設計されている":   g3_pass,
+        "④知識ではなく考え方を伝えている":      g4_pass,
+        "⑤この人にしか聞けないと思わせる":      g5_pass,
+    }
+    advice = {k: v for k, v in {
+        "①": g1_advice,
+        "②": g2_advice,
+        "③": g3_advice,
+        "④": g4_advice,
+        "⑤": g5_advice,
+    }.items() if v}
+
+    all_pass = all(gates.values())
+    return {
+        "all_pass":  all_pass,
+        "gates":     gates,
+        "advice":    advice,
+    }
+
+
+def _compute_four_scores(record: dict, flow: dict) -> dict:
+    """
+    Follower Score / Knowledge Score / Uniqueness Score / Series Score
+    各100点満点。80点未満は再生成対象。
+    """
+    combined = " ".join([
+        record.get("hook", ""),
+        record.get("script_full", ""),
+        record.get("cta", ""),
+        record.get("caption", ""),
+    ])
+
+    unique_count    = flow["_unique_count"]
+    useful_count    = flow["_useful_count"]
+    curiosity_count = flow["_curiosity_count"]
+    has_series      = flow["_has_series"]
+    has_follow_cta  = flow["_has_follow_cta"]
+    has_next_ep     = flow.get("has_next_ep", False)
+    hook_from_viewer = flow.get("hook_from_viewer", False)
+    is_pov_ng       = flow.get("is_pov_ng", False)
+    perspective_count = sum(1 for m in _PERSPECTIVE_MARKERS if m in combined)
+
+    # ── Follower Score (100pt): フォローしたくなる設計の強さ ─────────
+    fs = 0
+    fs += 25 if hook_from_viewer and not is_pov_ng else 0    # 視聴者悩みHook
+    fs += 25 if has_follow_cta else (10 if has_series else 0) # フォローCTA
+    fs += 25 if has_series and curiosity_count >= 2 else (15 if has_series or curiosity_count >= 2 else 0)
+    fs += 25 if unique_count >= 2 else (15 if unique_count == 1 else 0)  # 固有視点
+    follower_score = min(100, fs)
+
+    # ── Knowledge Score (100pt): 考え方を伝えているか ────────────────
+    ks = 0
+    ks += 40 if perspective_count >= 3 else (25 if perspective_count == 2 else (10 if perspective_count == 1 else 0))
+    ks += 30 if any(m in combined for m in ["正直に言います", "本当は", "実は"]) else 0
+    ks += 30 if any(m in combined for m in ["だから", "なぜなら", "理由は", "から来ています"]) else 0
+    knowledge_score = min(100, ks)
+
+    # ── Uniqueness Score (100pt): CORE HARIだから言えること ──────────
+    if unique_count >= 3:
+        uniqueness_score = 100
+    elif unique_count == 2:
+        uniqueness_score = 75
     elif unique_count == 1:
-        score_b = 18
+        uniqueness_score = 50
     else:
-        score_b = 0
+        uniqueness_score = 0
 
-    # C. 専門家として記憶に残る（25点）
-    if useful_count >= 3:
-        score_c = 25
-    elif useful_count == 2:
-        score_c = 18
-    elif useful_count == 1:
-        score_c = 10
-    else:
-        score_c = 0
+    # ── Series Score (100pt): シリーズとして見たくなるか ─────────────
+    ss = 0
+    ss += 40 if has_next_ep else 0
+    ss += 35 if has_follow_cta else (15 if has_series else 0)
+    ss += 25 if curiosity_count >= 2 else (10 if curiosity_count == 1 else 0)
+    series_score = min(100, ss)
 
-    # D. シリーズ化できるテーマ（15点）
-    if has_follow_cta:
-        score_d = 15
-    elif has_series:
-        score_d = 8
-    else:
-        score_d = 0
+    def _advice_list(label, score, hints):
+        return hints if score < 80 else []
 
-    total = score_a + score_b + score_c + score_d
-
-    breakdown = {
-        "A.続きも見たい感(30)":          score_a,
-        "B.この人しか言わない視点(30)":   score_b,
-        "C.専門家として記憶に残る(25)":   score_c,
-        "D.シリーズ化できるテーマ(15)":   score_d,
+    scores = {
+        "Follower Score":    follower_score,
+        "Knowledge Score":   knowledge_score,
+        "Uniqueness Score":  uniqueness_score,
+        "Series Score":      series_score,
     }
+    failing = {k: v for k, v in scores.items() if v < 80}
 
-    # 80点未満の場合の改善アドバイス
-    advice_items = []
-    if score_a < 20:
-        advice_items.append(
-            "【A】「フォローすると毎週〜」をscript_fullの末尾に追加 +"
-            " 「実は」「正直に言います」を2か所以上入れる"
+    advice = []
+    if follower_score < 80:
+        advice.append(
+            "【Follower Score】視聴者の悩みから始まるHook + フォローCTA + 固有視点2件以上を揃える"
         )
-    if score_b < 18:
-        advice_items.append(
-            "【B】咬筋優位・舌の位置・表情グセ・「骨格の大きさは変わりません」など"
-            "CORE HARI固有の視点を2つ以上入れる"
+    if knowledge_score < 80:
+        advice.append(
+            "【Knowledge Score】「なぜ〜なのか」「だから〜になる」など因果・視点を3か所以上入れる"
         )
-    if score_c < 18:
-        advice_items.append(
-            "【C】専門マーカー（咬筋・表情グセ・舌の位置・表情筋・正直に言います）を"
-            "3件以上使う"
+    if uniqueness_score < 80:
+        advice.append(
+            "【Uniqueness Score】咬筋優位・表情グセ・舌の位置など固有マーカーを2件以上入れる"
         )
-    if score_d < 8:
-        advice_items.append(
-            "【D】「フォローすると、毎週こういう情報を届けます。」を明示する"
+    if series_score < 80:
+        advice.append(
+            "【Series Score】「次回は〜」または「フォローすると毎週〜」を入れてシリーズ化する"
         )
 
     return {
-        "score":      total,
-        "breakdown":  breakdown,
-        "pass":       total >= 80,
-        "advice":     advice_items,
+        "scores":       scores,
+        "failing":      failing,
+        "all_pass":     len(failing) == 0,
+        "advice":       advice,
     }
 
 
@@ -1568,11 +1675,11 @@ def _assemble(today: str, source_type: str, source_url: str,
     review = _compute_creator_review(record)
     record["_creator_review"]   = review
     record["_ceo_challenge"]    = _generate_ceo_challenge(record, review)
-    fg = _check_follower_growth(record)
-    record["_follower_growth"]    = fg                                 # ⑫ 最優先KPI
-    if kpi_key == "フォロワー":
-        record["_follower_score"] = _compute_follower_score(record, fg)
-    record["_audience_thinking"]  = _check_audience_thinking(record)  # ⑬ 視聴者の頭の中
+    flow = _build_follower_flow(record)
+    record["_follower_flow"]    = flow                                  # ①〜⑤ フロー分析
+    record["_quality_gates"]    = _check_quality_gates(record, flow)   # 5ゲート品質チェック
+    record["_four_scores"]      = _compute_four_scores(record, flow)   # 4スコア自己採点
+    record["_audience_thinking"] = _check_audience_thinking(record)    # ⑬ 視聴者の頭の中
 
     return record
 
@@ -1975,77 +2082,82 @@ def print_creator_studio_summary(record: dict) -> None:
             body(improve, indent=4)
             print(f"  {'─'*50}")
 
-    # ── ⑫ Primary KPI Check ──────────────────────────────────────
-    fg      = record.get("_follower_growth", {})
-    fs      = record.get("_follower_score", {})
-    kpi_chk = record.get("_kpi", {})
-    kpi_k   = kpi_chk.get("key", "保存")
+    # ── ⑫ Follower Intelligence ─────────────────────────────────
+    flow   = record.get("_follower_flow", {})
+    gates  = record.get("_quality_gates", {})
+    scores = record.get("_four_scores", {})
 
-    if fg:
-        sec("⑫", f"Primary KPI Check【{kpi_icons.get(kpi_k,'')} {kpi_chk.get('label', kpi_k)}】")
+    if flow:
+        sec("⑫", "Follower Intelligence【フォロワーが増える投稿か？】")
 
-        # ── Follower 投稿: 4条件 + Follower Score ──────────────────
-        if kpi_k == "フォロワー":
-            print(f"\n  【Follower投稿の4条件】")
-            items   = fg.get("items", {})
-            advice  = fg.get("advice", {})
-            all_yes = fg.get("all_yes", False)
-            for label, ok in items.items():
-                icon = "✅ YES" if ok else "❌ NO "
-                print(f"  {icon}  {label}")
+        # ── Step①〜⑤: 投稿フロー分析 ──────────────────────────────
+        print(f"\n  ① Follower Goal（なぜフォローしたくなるか）")
+        print(f"    {flow.get('follower_goal', '—')}")
 
-            # Follower Score
-            if fs:
-                score    = fs.get("score", 0)
-                score_pass = fs.get("pass", False)
-                bar_filled = "█" * (score // 10)
-                bar_empty  = "░" * (10 - score // 10)
-                print(f"\n  【Follower Score】")
-                print(f"  {bar_filled}{bar_empty}  {score} / 100点")
-                breakdown = fs.get("breakdown", {})
-                for dim, pts in breakdown.items():
-                    print(f"    {dim}: {pts}点")
+        print(f"\n  ② Audience Emotion（視聴者の頭の中）")
+        print(f"    悩み    : {flow.get('audience_worry', '—')}")
+        print(f"    知りたい: {flow.get('audience_want', '—')}")
+        print(f"    先入観  : {flow.get('audience_belief', '—')}")
 
-                print(f"\n  {'─'*50}")
-                if all_yes and score_pass:
-                    print(f"  ✅ PASS — フォロワーが増える投稿です。投稿してください。")
-                else:
-                    if not all_yes:
-                        no_labels = [l for l, ok in items.items() if not ok]
-                        print(f"  ❌ FAIL — 4条件NG（{len(no_labels)}項目）+ 再生成してください")
-                    elif not score_pass:
-                        print(f"  ❌ FAIL — Follower Score {score}点（80点未満）+ 再生成してください")
-                    if advice:
-                        print(f"\n  【4条件の改善アクション】")
-                        for q_key, hint in advice.items():
-                            print(f"\n  {q_key}:")
-                            body(hint, indent=4)
-                    score_advice = fs.get("advice", [])
-                    if score_advice:
-                        print(f"\n  【Follower Scoreの改善アクション】")
-                        for a in score_advice:
-                            body(a, indent=4)
-                print(f"  {'─'*50}")
+        pov_ok  = not flow.get("is_pov_ng", False)
+        v_ok    = flow.get("hook_from_viewer", False)
+        pov_ico = "✅" if pov_ok else "❌"
+        v_ico   = "✅" if v_ok   else "❌"
+        print(f"\n  ③ Hook（視聴者の悩みから始まっているか）")
+        print(f"    {pov_ico} 施術者目線ではない: {'OK' if pov_ok else 'NG — 「施術は〜」から始めない'}")
+        print(f"    {v_ico} 悩みから始まっている: {'OK' if v_ok else 'NG — 視聴者の言葉でHookを書き直す'}")
 
-        # ── 保存・問い合わせ・信頼 投稿: 基本4条件のみ表示 ────────────
+        print(f"\n  ④ CORE HARI Perspective（他サロンでは言えない視点）")
+        print(f"    {flow.get('ch_perspective', '—')}")
+        print(f"    固有マーカー: {flow.get('ch_count', 0)}件")
+
+        print(f"\n  ⑤ Series Thinking（続きが見たくなる設計）")
+        print(f"    {flow.get('series_status', '—')}")
+
+        # ── 5ゲート品質チェック ────────────────────────────────────
+        print(f"\n  {'─'*52}")
+        print(f"  【5ゲート品質チェック】")
+        gate_items = gates.get("gates", {})
+        all_pass   = gates.get("all_pass", False)
+        for label, ok in gate_items.items():
+            icon = "✅" if ok else "❌"
+            print(f"  {icon}  {label}")
+
+        gate_advice = gates.get("advice", {})
+        if gate_advice:
+            print(f"\n  【再生成アクション】")
+            for key, hint in gate_advice.items():
+                print(f"\n  Gate{key}:")
+                body(hint, indent=4)
+
+        # ── 4スコア自己採点 ────────────────────────────────────────
+        score_dict   = scores.get("scores", {})
+        failing      = scores.get("failing", {})
+        scores_pass  = scores.get("all_pass", False)
+
+        print(f"\n  {'─'*52}")
+        print(f"  【4スコア自己採点】（80点未満 → 再生成）")
+        print()
+        score_order = ["Follower Score", "Knowledge Score", "Uniqueness Score", "Series Score"]
+        for name in score_order:
+            val  = score_dict.get(name, 0)
+            ok   = val >= 80
+            bar  = "█" * (val // 10) + "░" * (10 - val // 10)
+            flag = "✅" if ok else "❌"
+            print(f"  {flag} {name:<18s}: {bar} {val:3d}点")
+
+        print(f"\n  {'─'*52}")
+        if all_pass and scores_pass:
+            print(f"  ✅ ALL PASS — フォロワーが増える投稿です。投稿してください。")
         else:
-            items   = fg.get("items", {})
-            advice  = fg.get("advice", {})
-            all_yes = fg.get("all_yes", False)
-            print()
-            for label, ok in items.items():
-                icon = "✅ YES" if ok else "❌ NO "
-                print(f"  {icon}  {label}")
-            print(f"\n  {'─'*50}")
-            if all_yes:
-                print(f"  ✅ PASS — 専門性・視聴者目線ともにOKです。")
-            else:
-                no_labels = [l for l, ok in items.items() if not ok]
-                print(f"  ⚠️  {len(no_labels)}項目が未達（フォロワー投稿ではないため再生成は任意）")
-                for q_key, hint in advice.items():
-                    print(f"\n  {q_key}:")
-                    body(hint, indent=4)
-            print(f"  {'─'*50}")
+            fail_count = (0 if all_pass else sum(1 for v in gate_items.values() if not v)) + len(failing)
+            print(f"  ❌ FAIL — {fail_count}項目が未達。再生成してください。")
+            score_adv = scores.get("advice", [])
+            if score_adv:
+                print(f"\n  【スコア改善アクション】")
+                for a in score_adv:
+                    body(a, indent=4)
+        print(f"  {'─'*52}")
 
     # ── ⑬ Audience Thinking ──────────────────────────────────────
     at = record.get("_audience_thinking", {})
