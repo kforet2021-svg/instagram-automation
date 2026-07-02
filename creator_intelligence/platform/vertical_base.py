@@ -3,7 +3,10 @@ creator_intelligence/platform/vertical_base.py
 
 Creator Intelligence Platform — Vertical 抽象基底クラス。
 
-Vertical とは「ある専門家・事業向けのコンテンツ生成設定ひとまとまり」。
+このプラットフォームは「専門家の思考をAIが学ぶ」汎用エンジン。
+Instagram 投稿ツールではなく、Creator Intelligence Platform。
+
+Vertical とは「ある専門家・事業向けの知識ベース＋ブランドルール」のひとまとまり。
 CORE HARI は最初の Vertical（First Vertical）。
 
 新しい Vertical を追加するには:
@@ -11,8 +14,18 @@ CORE HARI は最初の Vertical（First Vertical）。
   2. VerticalBase を継承したクラスを実装する
   3. config.py の ACTIVE_VERTICAL を変えるか、環境変数 ACTIVE_VERTICAL を設定する
 
-Instagram 分析パイプライン（Bright Data / Research Candidate Score / OpenAI Analyzer）は
+分析パイプライン（Bright Data / Research Candidate Score / OpenAI Analyzer）は
 Vertical に依存しない。Vertical が差し替わっても main.py と分析処理は変わらない。
+
+# Knowledge Types（AIが学ぶ8つのカテゴリ）
+  Observation   = 専門家が現場で気づいたこと
+  Question      = 専門家がクライアントや読者に問いかける質問
+  Evidence      = 一般的な根拠・エビデンス（論文・統計など）
+  Experience    = 専門家の臨床経験・実体験
+  Perspective   = 専門家独自の考え方・解釈
+  Advice        = 専門家が与えるアドバイス・推奨行動
+  Research      = まだ検証中の仮説・探求中のテーマ
+  ContentAsset  = そのまま使えるコンテンツ素材（セリフ・例え話など）
 """
 
 from abc import ABC, abstractmethod
@@ -35,33 +48,41 @@ class BrandRules:
     cta_contact: str = "ご予約・ご相談はプロフィールのリンクからどうぞ。"
 
 
+# 汎用 knowledge_type の有効値（全Verticalで共通）
+KNOWLEDGE_TYPES = {
+    "Observation":   "専門家が現場で気づいたこと",
+    "Question":      "専門家がクライアント・読者に問いかける質問",
+    "Evidence":      "一般的な根拠・エビデンス（論文・統計など）",
+    "Experience":    "専門家の臨床経験・実体験",
+    "Perspective":   "専門家独自の考え方・解釈",
+    "Advice":        "専門家が与えるアドバイス・推奨行動",
+    "Research":      "まだ検証中の仮説・探求中のテーマ",
+    "ContentAsset":  "そのまま使えるコンテンツ素材（セリフ・例え話など）",
+}
+
+CONTENT_ROLES = {
+    "hook":      "動画冒頭フックで使える",
+    "body":      "本編説明・解説で使える",
+    "proof":     "信頼性・根拠として使える",
+    "universal": "どのパートでも使える",
+}
+
+
 @dataclass
 class KBEntry:
     """
     Knowledge Base の1エントリ。Vertical 固有の専門知識。
-
-    knowledge_type:
-      mechanism  = 施術・身体の仕組み
-      symptom    = お客様の悩み・症状
-      outcome    = 施術・継続の効果・変化
-      process    = 手順・フロー
-      faq        = よくある質問と正直な回答
-      self_care  = お客様が自分でできること
-
-    content_role:
-      hook       = 動画冒頭フックで使える
-      body       = 本編説明・解説で使える
-      proof      = 信頼性・根拠として使える
-      universal  = どのパートでも使える
+    knowledge_type は KNOWLEDGE_TYPES のキーを使う（全Vertical共通）。
+    content_role は CONTENT_ROLES のキーを使う。
     """
-    topic: str                     # 知識のトピック
-    fact: str                      # 実際の知識・事実（専門家が記載する核心）
-    tags: str                      # カンマ区切りタグ（StructurePatternと対応）
-    source: str                    # 出典
-    verified: bool                 # オーナー確認済みか
-    knowledge_type: str = ""       # mechanism / symptom / outcome / process / faq / self_care
-    content_role: str = "universal" # hook / body / proof / universal
-    example_sentence: str = ""     # この知識をどう話すか（オーナーが書く）
+    topic: str                      # 知識のトピック
+    fact: str                       # 実際の知識・事実（専門家が記載する核心）
+    tags: str                       # カンマ区切りタグ（StructurePatternと対応）
+    source: str                     # 出典
+    verified: bool                  # オーナー確認済みか
+    knowledge_type: str = "Evidence"  # KNOWLEDGE_TYPES のキー
+    content_role: str = "universal"   # CONTENT_ROLES のキー
+    speaker_words: str = ""         # 専門家がこの知識をどう語るか（セリフ例）
 
 
 @dataclass
@@ -159,7 +180,7 @@ class VerticalBase(ABC):
         for topic in pattern.proposed_kb_topics:
             proposals.append({
                 "topic": topic,
-                "fact": "（CORE HARIオーナーがここに実際の知識・事実を記入してください）",
+                "fact": "（専門家がここに実際の知識・事実を記入してください）",
                 "tags": ",".join(pattern.required_kb_tags),
                 "source": "未確認",
                 "verified": "no",

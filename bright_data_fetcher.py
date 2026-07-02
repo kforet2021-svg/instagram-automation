@@ -184,7 +184,10 @@ DEFAULT_RESULTS_PER_ACCOUNT = 8  # 1アカウントあたり取得する最新�
 # 対処だったため、120秒は不要に短すぎた。バッチサイズはそのままに
 # 待ち時間だけ300秒に伸ばす。
 POLL_INTERVAL_SEC = 5
-POLL_TIMEOUT_SEC = 300  # 300秒。これを超えたらこのバッチだけスキップし、次のバッチに進む。
+POLL_TIMEOUT_SEC = 150  # 1バッチあたりの最大待機秒数。超えたらそのバッチだけスキップ。
+# 【2026-07-02(10回目): 全バッチを合計した最大取得時間。これを超えたら残りのバッチは
+#   スキップして後続のOpenAI分析・Creator Studioへ進む(10分以内完了要件対応)】
+FETCH_TOTAL_BUDGET_SEC = 300  # Bright Data全体に許可する最大秒数(5分)
 
 # --- 通信リトライ設定 ---
 # Bright Data側、またはネットワーク経路で一時的に接続が切れる
@@ -656,13 +659,15 @@ def _trigger_and_collect(dataset_id: str, query: dict, input_list: list) -> tupl
     params = {"dataset_id": dataset_id, "format": "json", "include_errors": "true"}
     params.update(query)
 
+    print(f"[API START] Bright Data trigger ({len(input_list)}アカウント)")
     try:
         trigger_resp = _request_with_retry(
             "POST", f"{API_BASE}/datasets/v3/trigger", params=params, json=input_list, timeout=60
         )
         snapshot_id = trigger_resp.json().get("snapshot_id")
+        print(f"[API END] Bright Data trigger → snapshot_id={snapshot_id}")
     except requests.RequestException as e:
-        print(f"Bright Data trigger呼び出しに失敗しました(リトライ後も失敗): {e}")
+        print(f"[API TIMEOUT] Bright Data trigger skipped: {e}")
         return False, []
 
     if not snapshot_id:
@@ -675,12 +680,14 @@ def _trigger_and_collect(dataset_id: str, query: dict, input_list: list) -> tupl
     status = None
     while time.monotonic() < deadline:
         try:
+            print(f"[API START] Bright Data progress ({snapshot_id})")
             progress_resp = _request_with_retry(
                 "GET", f"{API_BASE}/datasets/v3/progress/{snapshot_id}", timeout=30
             )
             status = progress_resp.json().get("status")
+            print(f"[API END] Bright Data progress → status={status}")
         except requests.RequestException as e:
-            print(f"Bright Data progress確認に失敗しました(リトライ後も失敗、snapshot_id={snapshot_id}): {e}")
+            print(f"[API TIMEOUT] Bright Data progress skipped: {e}")
             return False, []
 
         if status == "ready":
@@ -697,16 +704,18 @@ def _trigger_and_collect(dataset_id: str, query: dict, input_list: list) -> tupl
         )
         return False, []
 
+    print(f"[API START] Bright Data snapshot download ({snapshot_id})")
     try:
         snapshot_resp = _request_with_retry(
             "GET",
             f"{API_BASE}/datasets/v3/snapshot/{snapshot_id}",
             params={"format": "json"},
-            timeout=120,
+            timeout=60,
         )
         payload = snapshot_resp.json()
+        print(f"[API END] Bright Data snapshot download 完了")
     except requests.RequestException as e:
-        print(f"Bright Data snapshotのダウンロードに失敗しました(リトライ後も失敗): {e}")
+        print(f"[API TIMEOUT] Bright Data snapshot skipped: {e}")
         return False, []
 
     _save_debug_snapshot(payload)
@@ -767,8 +776,21 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
     )
 
     failed_accounts = []
+    fetch_start = time.monotonic()
 
     for batch_index, batch_usernames in enumerate(batches, start=1):
+        elapsed = time.monotonic() - fetch_start
+        if elapsed >= FETCH_TOTAL_BUDGET_SEC:
+            remaining = len(batches) - batch_index + 1
+            print(
+                f"[API TIMEOUT] Bright Data 全体予算{FETCH_TOTAL_BUDGET_SEC}秒を超過({elapsed:.0f}秒経過)。"
+                f"残り{remaining}バッチをスキップして次の処理へ進みます。"
+            )
+            failed_accounts.extend(
+                u for b in batches[batch_index - 1:] for u in b
+            )
+            break
+
         input_list = [
             {
                 "url": _to_profile_url(username),

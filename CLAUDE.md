@@ -1,6 +1,9 @@
-# CLAUDE.md — インスタ自動化プロジェクト
+# CLAUDE.md — Creator Intelligence Platform
 
 Claude Codeがこのプロジェクトで作業する際に必ず読む設定ファイルです。
+
+> **最優先ルール**: 実装前に必ず [PROJECT_PRINCIPLES.md](PROJECT_PRINCIPLES.md) を参照すること。
+> 設計で迷ったら「CORE HARI専用か、全業種で使える設計か」を問い直す。
 
 ---
 

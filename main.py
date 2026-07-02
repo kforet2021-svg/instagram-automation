@@ -1,11 +1,12 @@
 """
 main.py
-「CORE HARI FACEのInstagram集客につながるリールを分析する」ための
-エントリーポイント。
+Creator Intelligence Platform — エントリーポイント。
 
-このシステムの目的はInstagram投稿を取得すること自体ではなく、
-Instagram全体で伸びている投稿の傾向を分析し、CORE HARI FACEの集客に
-使える投稿案を自動生成することである。
+このシステムの目的はInstagram投稿を自動化することではなく、
+専門家の思考をAIが学び、発信・提案・教育・コンテンツ作成を支援すること。
+CORE HARI FACEは最初の実証実験（First Vertical）。
+
+参照: PROJECT_PRINCIPLES.md
 
 【プール条件(2026-06-30: 採用/不採用の二値フィルタを廃止。下記参照)】
 bright_data_fetcher.build_post_poolが除外するのは、データとして分析に
@@ -331,6 +332,8 @@ from sheets_writer import (
     ensure_creator_intelligence_library_sheets,
     ensure_manual_post_results_sheet,
     ensure_evidence_sheets,
+    ensure_thought_library_sheet,
+    seed_thought_library,
 )
 from north_star_index import compute_north_star_index
 from north_star_report import save_north_star_daily_markdown
@@ -813,6 +816,177 @@ def _analyze_and_save_trend(category_label: str, posts: list) -> None:
         print(f"{category_label}の分析結果の保存中にエラーが発生しました: {e}")
 
 
+def _ceo_review(cs_record: dict, pool_count: int, analyzed_count: int) -> None:
+    """
+    Creator Intelligence Platform — CEO REVIEW。
+    実行データをもとに7つの軸で今回の実行を評価する。
+    AI呼び出し・外部通信なし（コストゼロ）。
+    """
+    import os, pathlib
+
+    # ── データ収集 ─────────────────────────────────────────────────
+    # Thought Library の状態
+    tl_entries = []
+    try:
+        import sheets_writer as _sw
+        tl_entries = _sw.get_thought_library()
+    except Exception:
+        pass
+
+    tl_types = {e.get("knowledge_type", "") for e in tl_entries if e.get("knowledge_type")}
+    universal_types = {"Observation", "Question", "Evidence", "Experience",
+                       "Perspective", "Advice", "Research", "ContentAsset"}
+    tl_type_coverage = len(tl_types & universal_types)
+
+    # Creator Studio の実行状態
+    cs_ran       = bool(cs_record)
+    cs_from_tl   = cs_ran and bool(cs_record.get("thought_library_used"))
+    cs_em_match  = cs_ran and cs_record.get("qa_passed", False)
+
+    # Vertical 抽象化の確認（垂直ファイル存在チェック）
+    try:
+        _here = pathlib.Path(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        _here = pathlib.Path(os.getcwd())
+    verticals_dir = _here / "creator_intelligence" / "verticals"
+    vertical_count = len([p for p in verticals_dir.iterdir() if p.is_dir() and not p.name.startswith("_")]) if verticals_dir.exists() else 0
+
+    # ── 判定ロジック ───────────────────────────────────────────────
+    def _verdict(cond_pass, cond_partial):
+        if cond_pass:   return "✅ PASS"
+        if cond_partial: return "🔶 PARTIAL"
+        return "❌ FAIL"
+
+    checks = []
+
+    # 1. Mission Check
+    v = _verdict(
+        cs_ran and pool_count > 0,
+        cs_ran or pool_count > 0,
+    )
+    note = ""
+    if "PARTIAL" in v:
+        note = "→ Creator Studio または投稿取得のいずれかが機能していない。両方が動いてこそMissionに近い。"
+    if "FAIL" in v:
+        note = "→ Creator Studioも投稿取得も動いていない。パイプライン全体を確認すること。"
+    checks.append(("Mission Check", "Creator Intelligenceに近づいているか？", v, note))
+
+    # 2. Generalization Check
+    v = _verdict(
+        vertical_count >= 1 and tl_type_coverage >= 3,
+        vertical_count >= 1,
+    )
+    note = ""
+    if "PARTIAL" in v:
+        note = f"→ Vertical抽象化はあるが、Thought Libraryのknowledge_type多様性が低い（{tl_type_coverage}/8種）。"
+    if "FAIL" in v:
+        note = "→ creator_intelligence/verticals/ にVerticalが存在しない。汎用化が未着手。"
+    checks.append(("Generalization Check", "CORE HARI以外の専門家にも使える設計か？", v, note))
+
+    # 3. Asset Check
+    v = _verdict(
+        len(tl_entries) >= 5 and tl_type_coverage >= 3,
+        len(tl_entries) >= 1,
+    )
+    note = ""
+    if "PARTIAL" in v:
+        note = f"→ Thought Libraryに{len(tl_entries)}件あるが、knowledge_typeの多様性が足りない（{tl_type_coverage}/8種）。"
+    if "FAIL" in v:
+        note = "→ Thought Libraryが空。思考資産がゼロの状態では投稿しか残らない。"
+    checks.append(("Asset Check", "投稿ではなく、思考資産（Observation/Perspective等）が増えているか？", v, note))
+
+    # 4. 10-Year Check
+    # Instagram依存度を確認（将来的な他SNS展開の準備ができているか）
+    sheets_module = _here / "sheets_writer.py"
+    insta_only = True
+    try:
+        content = sheets_module.read_text()
+        insta_only = "threads" not in content.lower() and "youtube" not in content.lower()
+    except Exception:
+        pass
+    v = _verdict(
+        not insta_only and tl_type_coverage >= 3,
+        tl_type_coverage >= 2,
+    )
+    note = ""
+    if "PARTIAL" in v:
+        note = "→ Thought Libraryの設計は汎用だが、出力先がInstagramに依存している。SNS非依存の出力レイヤーが将来の課題。"
+    if "FAIL" in v:
+        note = "→ Instagram専用設計のまま。思考資産の蓄積なしでは10年後の価値が残らない。"
+    checks.append(("10-Year Check", "10年後も価値が残る設計か？", v, note))
+
+    # 5. Monetization Check
+    v = _verdict(
+        vertical_count >= 2,  # 2つ目のVerticalが存在すれば「横展開可能」と判断
+        vertical_count >= 1 and len(tl_entries) >= 5,
+    )
+    note = ""
+    if "PARTIAL" in v:
+        note = "→ First Verticalは動いているが、他業種への展開がまだない。2つ目のVerticalが商品化の証明になる。"
+    if "FAIL" in v:
+        note = "→ Vertical設計・Thought Libraryの両方が不足。他者に売れる状態ではない。"
+    checks.append(("Monetization Check", "将来的に商品化できる価値があるか？", v, note))
+
+    # 6. WOW Check
+    # Thought Library × Editorial Meeting × Creator Studio の連動が動いているか
+    v = _verdict(
+        cs_ran and len(tl_entries) >= 3 and cs_em_match,
+        cs_ran and len(tl_entries) >= 1,
+    )
+    note = ""
+    if "PARTIAL" in v:
+        note = "→ 各機能は動いているが、Editorial Meeting→Thought Library→Creator Studioの完全連動がまだ浅い。"
+    if "FAIL" in v:
+        note = "→ Creator Studioが動いていない。WOW体験を生み出す中核機能が停止している。"
+    checks.append(("WOW Check", "他社が簡単に真似できない価値があるか？", v, note))
+
+    # 7. Kill Check
+    # 「Creator Studioを削除したら何が残るか？」— InstagramデータのみならKILL
+    v = _verdict(
+        cs_ran and len(tl_entries) >= 3,
+        cs_ran,
+    )
+    note = ""
+    if "PARTIAL" in v:
+        note = "→ Creator Studioは動いているが、Thought Libraryが薄いためInstagram分析ツールに見える。"
+    if "FAIL" in v:
+        note = "→ Creator Studioが動いていない。削除しても何も変わらない状態 = Creator Intelligenceではない。"
+    checks.append(("Kill Check", "この機能を削除したらCreator Intelligenceらしさが失われるか？", v, note))
+
+    # ── 出力 ──────────────────────────────────────────────────────
+    print()
+    print("=" * 34)
+    print("       CEO REVIEW")
+    print("=" * 34)
+
+    pass_count    = sum(1 for _, _, v, _ in checks if "PASS" in v)
+    partial_count = sum(1 for _, _, v, _ in checks if "PARTIAL" in v)
+    fail_count    = sum(1 for _, _, v, _ in checks if "FAIL" in v)
+
+    for name, question, verdict, note in checks:
+        print(f"\n【{name}】")
+        print(f"  {question}")
+        print(f"  {verdict}")
+        if note:
+            print(f"  {note}")
+
+    print()
+    print(f"  Summary: PASS {pass_count} / PARTIAL {partial_count} / FAIL {fail_count}")
+    print()
+
+    if fail_count > 0:
+        print("  ⚠️  FAILが残っています。次のスプリントで最優先で対処してください。")
+    elif partial_count >= 3:
+        print("  📋 PARTIALが多い。Creator Intelligence Platformへの移行を加速してください。")
+    else:
+        print("  🟢 Creator Intelligence Platformとして正しい方向に進んでいます。")
+
+    print()
+    print("  Ref: PROJECT_PRINCIPLES.md")
+    print("=" * 34)
+    print()
+
+
 def main() -> None:
     try:
         validate_config()
@@ -839,6 +1013,29 @@ def main() -> None:
         ensure_evidence_sheets()
     except Exception as e:
         print(f"evidence_registry/evidence_linksシートの作成中にエラーが発生しました: {e}")
+
+    # 2026-07-02(10回目): Thought Library シートを起動時に作成 + 初回のみシード投入
+    try:
+        ensure_thought_library_sheet()
+        from creator_studio import _THOUGHT_LIBRARY_SEED
+        seed_thought_library(_THOUGHT_LIBRARY_SEED)
+    except Exception as e:
+        print(f"thought_libraryシートの初期化中にエラーが発生しました: {e}")
+
+    # グローバル10分デッドライン(2026-07-02(10回目): タイムアウト対策)
+    import time as _time
+    _RUN_START = _time.monotonic()
+    _RUN_BUDGET_SEC = 570  # 9.5分。残り30秒はCreator Studio出力に確保
+
+    def _budget_remaining() -> float:
+        return _RUN_BUDGET_SEC - (_time.monotonic() - _RUN_START)
+
+    def _budget_ok(label: str = "") -> bool:
+        remaining = _budget_remaining()
+        if remaining <= 0:
+            print(f"[GLOBAL TIMEOUT] 10分予算を超過しました。{label}をスキップして終了します。")
+            return False
+        return True
 
     # 0. accounts.pyで管理している取得対象アカウント(ジャンル不問)を読み込む
     accounts = list(ANTENNA_ACCOUNTS)
@@ -880,12 +1077,14 @@ def main() -> None:
         print("===== 取得・プールログ =====")
         _print_stats(CATEGORY_ALL, result["stats"])
         # 2026-07-01: 投稿0件でもCreator Studioは実行する(昨日以前のデータを使う)
+        cs_record_early = {}
         try:
-            cs_record = generate_creator_studio_daily()
-            if cs_record:
-                print_creator_studio_summary(cs_record)
+            cs_record_early = generate_creator_studio_daily() or {}
+            if cs_record_early:
+                print_creator_studio_summary(cs_record_early)
         except Exception as e:
             print(f"Creator Studioの実行中にエラーが発生しました: {e}")
+        _ceo_review(cs_record=cs_record_early, pool_count=0, analyzed_count=0)
         return
 
     # 4. プール対象の投稿をスプレッドシートに保存(構造的に使えない投稿は保存しない)
@@ -905,15 +1104,21 @@ def main() -> None:
     # 6. プール対象の投稿全件(①全体トレンド+②美容ジャンルトレンドが混在した
     #    1つのプール)のResearch Candidate Scoreを計算・記録し、スコア上位件だけ
     #    個別AI分析する
-    _score_and_analyze_posts(posts)
+    if _budget_ok("ステップ6: Research Candidate Score + AI個別分析"):
+        _score_and_analyze_posts(posts)
+    else:
+        print("ステップ6をスキップ: OpenAI個別分析なしでCreator Studioへ進みます")
 
     # 7. OpenAIに集約分析を依頼(2026-07-02(item5): ①と②はResearch Candidate
     #    Score・個別AI分析では統合プールとして扱うが、この集約分析
     #    (analyze_category_trend)だけはカテゴリごとに分けて実行する)
-    posts_all = [p for p in posts if p.get("category") == CATEGORY_ALL]
-    posts_beauty = [p for p in posts if p.get("category") == CATEGORY_BEAUTY]
-    _analyze_and_save_trend(CATEGORY_ALL, posts_all)
-    _analyze_and_save_trend(CATEGORY_BEAUTY, posts_beauty)
+    if _budget_ok("ステップ7: カテゴリ集約分析"):
+        posts_all = [p for p in posts if p.get("category") == CATEGORY_ALL]
+        posts_beauty = [p for p in posts if p.get("category") == CATEGORY_BEAUTY]
+        _analyze_and_save_trend(CATEGORY_ALL, posts_all)
+        _analyze_and_save_trend(CATEGORY_BEAUTY, posts_beauty)
+    else:
+        print("ステップ7をスキップ: カテゴリ集約分析なしでCreator Studioへ進みます")
 
     # 8. 取得・除外・プール件数のログを表示
     print()
@@ -921,8 +1126,9 @@ def main() -> None:
     _print_stats(CATEGORY_ALL, result["stats"])
 
     # 2026-07-01: Creator Studio MVP — 常に最後に実行(データが0件の日も動く)
+    cs_record = {}
     try:
-        cs_record = generate_creator_studio_daily()
+        cs_record = generate_creator_studio_daily() or {}
         if cs_record:
             print_creator_studio_summary(cs_record)
     except Exception as e:
@@ -930,6 +1136,13 @@ def main() -> None:
 
     print()
     print("すべての処理が完了しました")
+
+    # CEO REVIEW — 毎実行の最後にMission整合性を確認する
+    _ceo_review(
+        cs_record=cs_record,
+        pool_count=result["stats"].get("pool_count", 0),
+        analyzed_count=result["stats"].get("analyzed_count", 0),
+    )
 
 
 if __name__ == "__main__":

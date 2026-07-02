@@ -331,6 +331,8 @@ SHEET_EVIDENCE_REGISTRY = "evidence_registry"
 SHEET_EVIDENCE_LINKS = "evidence_links"
 # 2026-07-01: CORE HARI専門知識DB（Creator Studioがコンテンツを生成する唯一の知識源）
 SHEET_CORE_HARI_KB = "core_hari_kb"
+# 2026-07-02(10回目): Thought Library — 考え方・話し方・例え話のデータベース
+SHEET_THOUGHT_LIBRARY = "thought_library"
 
 RANK_TOP_N = 20
 
@@ -665,6 +667,22 @@ CORE_HARI_KB_HEADERS = [
     "notes",            # 補足・注意事項（任意）
 ]
 
+# 2026-07-02(10回目): Thought Library — 考え方・話し方・例え話のデータベース
+# 「単語」ではなく「考え方」を保存する。Creator Studio はここから台本を組み立てる。
+# Thought Library — Creator Intelligence Platform 汎用スキーマ
+# knowledge_type は KNOWLEDGE_TYPES の値:
+#   Observation / Question / Evidence / Experience / Perspective / Advice / Research / ContentAsset
+THOUGHT_LIBRARY_HEADERS = [
+    "id",               # 一意識別子（例: TL-001）
+    "topic",            # テーマの短い識別子
+    "knowledge_type",   # Observation/Question/Evidence/Experience/Perspective/Advice/Research/ContentAsset
+    "content",          # 知識の核心（専門家が記載する。1〜3文）
+    "speaker_words",    # 専門家がこの知識をどう語るか（複数のセリフ例。改行区切り）
+    "evidence_level",   # A: 研究・文献あり / B: 実践経験に基づく / C: 仮説・探求中
+    "verified",         # TRUE / FALSE
+    "updated_at",       # 最終更新日（YYYY-MM-DD）
+]
+
 AUTO_ADDED_ACCOUNTS_HEADERS = [
     "追加日時",
     "ユーザー名",
@@ -720,9 +738,11 @@ def _get_spreadsheet():
     if not GOOGLE_SHEET_ID:
         raise EnvironmentError("GOOGLE_SHEET_ID が設定されていません。")
 
+    print("[API START] Google Sheets 接続")
     creds = _load_credentials()
     gc = gspread.authorize(creds)
     _spreadsheet = gc.open_by_key(GOOGLE_SHEET_ID)
+    print("[API END] Google Sheets 接続")
     return _spreadsheet
 
 
@@ -1937,3 +1957,82 @@ def get_recent_creator_studio_records(days: int = 30) -> list:
         result.append(values)
     result.sort(key=lambda x: float(x.get("brand_score") or 0), reverse=True)
     return result
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Thought Library (2026-07-02(10回目))
+# 考え方・話し方・例え話のデータベース。
+# Creator Studio はここから台本を組み立てる。
+# ────────────────────────────────────────────────────────────────────────────
+
+def ensure_thought_library_sheet() -> None:
+    """thought_library シートのタブ+ヘッダー行を、なければ作成する。"""
+    try:
+        _get_or_create_worksheet(SHEET_THOUGHT_LIBRARY, THOUGHT_LIBRARY_HEADERS)
+        print("  ✓ thought_library シート確認済")
+    except Exception as e:
+        print(f"  ⚠️ thought_library シート作成失敗: {e}")
+
+
+def get_thought_library() -> list:
+    """
+    thought_library シートの全行を読み込む。
+    verified="TRUE" の行のみを返す（FALSE は候補段階で使わない）。
+    戻り値: [dict, ...] — THOUGHT_LIBRARY_HEADERS のキーを持つ辞書のリスト
+    """
+    print("[API START] Google Sheets thought_library 読み込み")
+    try:
+        worksheet = _get_or_create_worksheet(SHEET_THOUGHT_LIBRARY, THOUGHT_LIBRARY_HEADERS)
+        all_values = worksheet.get_all_values()
+        print("[API END] Google Sheets thought_library 読み込み")
+    except Exception as e:
+        print(f"[API TIMEOUT] thought_library 読み込みスキップ: {e}")
+        return []
+
+    if len(all_values) < 2:
+        return []
+    header = all_values[0]
+    result = []
+    for row in all_values[1:]:
+        if not row or not any(row):
+            continue
+        values = {header[i]: (row[i] if i < len(row) else "") for i in range(len(header))}
+        # verified="TRUE" のみ使用
+        if str(values.get("verified", "")).strip().upper() == "TRUE":
+            result.append(values)
+    return result
+
+
+def seed_thought_library(entries: list) -> None:
+    """
+    thought_library シートが空のときだけシードデータを投入する（冪等）。
+    entries: THOUGHT_LIBRARY_HEADERS に対応するキーを持つ辞書のリスト。
+    既に1件でもデータ行があれば何もしない（手動編集を保護するため）。
+    """
+    print("[API START] Google Sheets thought_library シード確認")
+    try:
+        worksheet = _get_or_create_worksheet(SHEET_THOUGHT_LIBRARY, THOUGHT_LIBRARY_HEADERS)
+        existing = worksheet.get_all_values()
+        print("[API END] Google Sheets thought_library シード確認")
+    except Exception as e:
+        print(f"[API TIMEOUT] thought_library シード確認スキップ: {e}")
+        return
+
+    if len(existing) >= 2:  # ヘッダー + 1行以上あれば投入しない
+        print(f"  thought_library: 既に{len(existing)-1}件あるためシードをスキップ")
+        return
+
+    if not entries:
+        return
+
+    rows = []
+    for e in entries:
+        row = [str(e.get(h, "")) for h in THOUGHT_LIBRARY_HEADERS]
+        rows.append(row)
+
+    print(f"[API START] Google Sheets thought_library シード投入 ({len(rows)}件)")
+    try:
+        worksheet.append_rows(rows, value_input_option="USER_ENTERED")
+        print(f"[API END] Google Sheets thought_library シード投入完了")
+    except Exception as e:
+        print(f"[API TIMEOUT] thought_library シード投入失敗: {e}")

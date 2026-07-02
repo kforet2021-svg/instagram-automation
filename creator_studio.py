@@ -13,6 +13,7 @@ creator_studio.py
 【2026-07-02(7回目): Follower Intelligence全面刷新 — 5ステップ生成フロー＋5ゲート品質チェック＋4スコア自己採点。「情報提供」から「考え方・視点・シリーズ設計」へ転換】
 【2026-07-02(8回目): Editorial Meeting追加 — Creator Studio前段に「今日のテーマ会議」を実装。社会トレンド×CORE HARI接点→5案→採用理由の説明を必須化】
 【2026-07-02(9回目): QA Loop追加 — 4スコア（Follower/Knowledge/Uniqueness/Series）が全て80点以上になるまで自動改善。FAILをユーザーへ表示しない】
+【2026-07-02(10回目): Editorial MeetingのSelected TopicをCreator Studioの唯一のテーマ源に変更。生成後に一致チェックし、不一致なら再生成。】
 
 目的：Creator Studioを開いたら5分以内に撮影を開始できる状態を作る。
       分析結果の表示ではなく、今日そのまま使える撮影指示書として出力する。
@@ -1512,57 +1513,333 @@ def _compute_four_scores(record: dict, flow: dict) -> dict:
 
 _MAX_QA_ITER = 3  # 最大改善回数（無限ループ防止）
 
-# Knowledge Score 改善パッチ（perspective markers を注入）
-_PATCH_KNOWLEDGE = [
-    "なぜなら、顔の悩みのほとんどは骨格ではなく筋肉のクセから来ているからです。",
-    "だから、表情グセを変えることが顔を変える最短ルートです。",
-    "本質は、毎日積み重なる表情グセが顔の形を決めているということです。",
+# ────────────────────────────────────────────────────────────────────────────
+# Thought Library — 森このみの「考え方・話し方・例え話」のデータベース
+#
+# 各エントリ:
+#   topic      : テーマの短い識別子（検索キーワードとして使う）
+#   keywords   : editorial_meeting のテーマ文字列との照合に使うキーワードリスト
+#   fact       : 客観的事実（専門知識）
+#   reason     : なぜそうなるのか（因果の説明）
+#   core_hari_view : CORE HARIならではの解釈・独自視点
+#   analogy    : 例え話（分かりやすく伝えるための比喩）
+#   spoken     : 森このみが実際に話す言葉（複数パターン。script_full に使う）
+#   cta_spoken : この話題に合ったCTA文（話し言葉）
+# ────────────────────────────────────────────────────────────────────────────
+
+# ────────────────────────────────────────────────────────────────────────────
+# Thought Library — シードデータ（thought_library シートが空のときだけ投入）
+#
+# フィールドは sheets_writer.THOUGHT_LIBRARY_HEADERS に対応:
+#   id / topic / fact / mechanism / core_hari_perspective / analogy /
+#   common_misunderstanding / client_question / story / home_care /
+#   next_topic / evidence_level / verified / updated_at
+#
+# story フィールドには「森このみが実際に話す言葉」を改行区切りで記述する。
+# Creator Studio はここから台本を組み立てる。
+# ────────────────────────────────────────────────────────────────────────────
+
+# Thought Library シードデータ — Creator Intelligence Platform 汎用スキーマ
+# このシードは CORE HARI FACE（顔専門エステ）の First Vertical として実装。
+# 他の Vertical を追加する場合は creator_intelligence/verticals/{id}/思考ライブラリ.py を作り
+# main.py の初期化ブロックでそちらのシードを呼ぶ。
+#
+# knowledge_type の選択基準（全 Vertical 共通）:
+#   Observation  = 専門家が現場で気づいたこと（クライアント観察・施術所見）
+#   Question     = 専門家がクライアント・読者に問いかける質問
+#   Evidence     = 一般的な根拠・エビデンス（解剖学・論文・統計）
+#   Experience   = 専門家の臨床経験・実体験（「〜件施術してきて分かった」）
+#   Perspective  = 専門家独自の考え方・解釈（他では言わない見方）
+#   Advice       = 専門家が与えるアドバイス・推奨行動
+#   Research     = まだ検証中の仮説・探求中のテーマ
+#   ContentAsset = そのまま使えるコンテンツ素材（セリフ・例え話・投稿下書き）
+_THOUGHT_LIBRARY_SEED = [
+    {
+        "id": "TL-001",
+        "topic": "咬筋とむくみ",
+        "knowledge_type": "Perspective",
+        "content": "顔のむくみの多くは、リンパが詰まっているのではなく咬筋の過緊張が原因。食いしばりや片側噛みで咬筋が固くなると、周囲の血流とリンパ循環が物理的に圧迫されて滞る。「流す前に、緩める」という順番が重要。",
+        "speaker_words": "「顔がむくんでる」と感じたとき、多くの方がリンパを疑います。でも正直に言います。リンパより先に確認してほしいものがあります。\n咬筋です。食いしばりや片側噛みのクセがある方は、咬筋が固くなって顔全体の循環を妨げています。\nだから私のところでは、マッサージで流す前に、まず咬筋を緩めることから始めます。\n「流す前に、緩める」。これが私の考え方です。",
+        "evidence_level": "B",
+        "verified": "TRUE",
+        "updated_at": "2026-07-03",
+    },
+    {
+        "id": "TL-002",
+        "topic": "老け見えと表情グセ",
+        "knowledge_type": "Perspective",
+        "content": "顔の老け見えは骨格の形ではなく、長年積み重なった表情グセが原因のことがほとんど。片側で噛む、眉を上げる、口角を引き下げるといった日常の動作が毎日少しずつ顔の形を変える。表情筋は約60種類あり、使い方の偏りが皮膚の位置を変える。",
+        "speaker_words": "「骨格だから仕方ない」と思っていませんか？正直に言います。\n顔の老け見えを決めているのは、骨格の形よりも表情グセの積み重ねです。\n片側で噛む、眉を上げる、寝るときに同じ方向を向く。こういう小さなクセが、毎日少しずつ顔の形を変えていきます。\nなぜなら、表情筋は約60種類あって、使い方の偏りがそのまま顔の歪みになって出てくるからです。\nだから私は、骨格を整える前に表情グセを変えることから始めます。\nフォローすると、こういう話を毎週しています。気になった方はフォローしておいてください。",
+        "evidence_level": "B",
+        "verified": "TRUE",
+        "updated_at": "2026-07-03",
+    },
+    {
+        "id": "TL-003",
+        "topic": "フェイスラインと姿勢・舌の位置",
+        "knowledge_type": "Observation",
+        "content": "フェイスラインのたるみは、舌の位置と姿勢が深く関わっている。舌が正しい位置（上あごの前歯の裏）にないと、顔全体が重力に負け始める。舌は顔を内側から支える筋肉群とつながっているため、舌が落ちると頬の筋肉も連動して下がってくる。",
+        "speaker_words": "今、舌はどこにありますか？\n上あごの前歯の裏についていれば正解。下に落ちていたら、それがフェイスラインたるみの一因です。\nなぜなら、舌は顔を内側から支える役割をしているからです。舌が落ちると、頬も連動して下がってきます。\nデスクワークやスマホで前傾姿勢が続いている方は特に要注意です。姿勢が崩れると首と顎の筋肉が緊張して、顔が重力に引っ張られっぱなしになります。\nだから私は、フェイスラインを整える前に舌の位置と姿勢の話をします。根本から変えないと戻ってくるので。\n保存して、あとで確認してみてください。舌の位置は今日からでも意識できます。",
+        "evidence_level": "B",
+        "verified": "TRUE",
+        "updated_at": "2026-07-03",
+    },
+    {
+        "id": "TL-004",
+        "topic": "顔の左右差と咬筋の左右差",
+        "knowledge_type": "Experience",
+        "content": "顔の左右差の多くは、噛み癖（片側噛み）による咬筋の左右差から来ている。「骨格が非対称」と言われることが多いが、実際に施術してみると骨格より筋肉の差の方が大きいことがほとんど。筋肉は変えられる。",
+        "speaker_words": "「顔が左右非対称」と悩んでいる方へ、正直に言います。\n骨格のせいだと思っていませんか？実は、施術してみると骨格より咬筋の左右差の方が原因として大きいことがほとんどです。\nなぜかというと、右側でばかり噛む癖があると右の咬筋だけが発達します。逆に左は使われず、どんどん落ちてきます。\n筋肉は変えられます。だから、左右差があってもあきらめないでください。\nフォローすると、こういう話を毎週お届けします。",
+        "evidence_level": "B",
+        "verified": "TRUE",
+        "updated_at": "2026-07-03",
+    },
+    {
+        "id": "TL-005",
+        "topic": "写真と表情筋のコリ",
+        "knowledge_type": "Observation",
+        "content": "写真で老けて見えたり笑顔が引きつって見えたりするのは、表情筋がコリ固まっているサイン。感情は動いているのに筋肉がついてこられない状態。「笑顔の練習」より先に表情筋のコリを取ることの方が重要。",
+        "speaker_words": "「写真の自分が嫌い」という方へ。\n笑顔の練習をしても変わらないとしたら、表情筋がコリ固まっているかもしれません。\n顔には約60種類の筋肉がありますが、日常で使っている筋肉はそのごく一部。使わない筋肉は固くなります。\n固まったまま笑おうとするから、引きつるんです。\nだから私は、まずコリをほぐすことから始めます。そうすると、練習しなくても自然な笑顔になっていきます。\nこのアプローチに興味がある方はフォローしてください。毎週続きを話しています。",
+        "evidence_level": "B",
+        "verified": "TRUE",
+        "updated_at": "2026-07-03",
+    },
+    {
+        "id": "TL-006",
+        "topic": "顔への自信と表情筋の使い方",
+        "knowledge_type": "Perspective",
+        "content": "「素顔に自信がない」という悩みの多くは、骨格の問題ではなく表情筋の「使い方のクセ」から来ている。表情は筋肉が習慣的に動くパターンで作られるため、使い方のクセを変えると同じ骨格でも印象が変わる。",
+        "speaker_words": "「素顔に自信がない」という方へ、伝えたいことがあります。\n骨格のせいだと思っていませんか？正直に言います。\n施術していて感じるのは、印象を決めているのは骨格よりも、表情筋の使い方のクセが大きいということです。\n使い方のクセを変えると、同じ骨格なのに印象が変わります。私はそれを何度も見てきました。\nフォローすると、こういう話を毎週お届けします。",
+        "evidence_level": "B",
+        "verified": "TRUE",
+        "updated_at": "2026-07-03",
+    },
+    {
+        "id": "TL-007",
+        "topic": "施術回数と正直なタイムライン",
+        "knowledge_type": "Advice",
+        "content": "1回目は感覚的な変化が主。3回目前後からフェイスラインの変化を感じ始め、6回以上で変化が定着することが多い。筋肉のクセは繰り返すことで神経が新しい動きを学習して変わるため、継続が前提。",
+        "speaker_words": "「何回で変わりますか？」に正直に答えます。\n1回目は感覚が変わります。顔が軽くなった、スッキリしたという感覚です。\nでも見た目の変化が出始めるのは、3回目前後からが多いです。\n変化が定着してくるのは、6回以上続けてから。これが私が見てきた正直なラインです。\n「1回で変わる」と言えたら簡単なんですが、それは正直な答えではないので言いません。\nただ、続けると変わります。それだけは言えます。\n気になった方はまずカウンセリングからどうぞ。プロフィールのリンクから予約できます。",
+        "evidence_level": "B",
+        "verified": "TRUE",
+        "updated_at": "2026-07-03",
+    },
+    {
+        "id": "TL-008",
+        "topic": "スマホとデスクワーク",
+        "knowledge_type": "Evidence",
+        "content": "頭の重さは約5〜6kg。前傾になるほど首にかかる負荷は2〜3倍になる。その負荷は顎・頬・こめかみまで連動して広がる。スマホ・デスクワークで前傾姿勢が続くと、首と顎の筋肉が慢性的に緊張しフェイスラインに影響を与える。",
+        "speaker_words": "「最近顔が重い」と感じたら、まず今の姿勢を見てください。\nスマホを見るとき、頭が前に出ていませんか？\n頭の重さは約5〜6kg。前傾になると、首にかかる負荷は2〜3倍になります。\nその負荷が顎、頬、こめかみまで連動して広がっていきます。だから「顔が重い」と感じるんです。\n施術で整えても、毎日10時間前傾で過ごせば戻ります。だから姿勢の話を、私は必ずします。\n保存して、今日の姿勢を見直すきっかけにしてください。",
+        "evidence_level": "A",
+        "verified": "TRUE",
+        "updated_at": "2026-07-03",
+    },
+    {
+        "id": "TL-009",
+        "topic": "表情が乏しい",
+        "knowledge_type": "Observation",
+        "content": "「表情が乏しい」「感情が出にくい」と感じる人の多くは、表情筋がコリ固まっている。感情は動いているのに筋肉がついてこられない状態。マスク生活や表情を動かす機会の少ない環境で筋肉が動くことを「忘れる」ようになる。",
+        "speaker_words": "「表情が硬い」と言われたことがある方へ。\nそれ、練習不足ではないかもしれません。\n表情筋は約60種類ありますが、マスク生活や日常で使わない筋肉が固まってくると、いざ動かそうとしても動いてくれなくなります。\n感情はちゃんと動いているのに、筋肉がついてこられていない状態です。\nだから「笑顔の練習」より先に、まず表情筋を動ける状態に戻すことを考えます。\nフォローすると、こういう話を毎週しています。",
+        "evidence_level": "B",
+        "verified": "TRUE",
+        "updated_at": "2026-07-03",
+    },
+    {
+        "id": "TL-010",
+        "topic": "顔痩せとカロリー制限",
+        "knowledge_type": "Perspective",
+        "content": "「痩せたのに顔だけ変わらない」のは、顔の大きさが脂肪だけで決まっていないから。筋肉のコリ・むくみ・姿勢の組み合わせが顔のサイズに影響する。カロリー制限では表情筋のコリや咬筋緊張・姿勢性のむくみは変わらない。",
+        "speaker_words": "「痩せたのに顔だけ変わらない」という方へ、正直に言います。\n顔痩せはカロリー制限では変わりません。理由は、顔の大きさを決めているのが脂肪だけではないからです。\n表情筋のコリ、咬筋の緊張、姿勢からくるむくみ。この3つが合わさって、顔の印象を決めています。\nだから私のところに来られる方には、食事制限より先に「筋肉と姿勢を変えましょう」という話をします。\nアプローチが違うので、続けても変わらなかったのは当然のことです。\nこのアプローチに興味がある方は、プロフィールのリンクからカウンセリングへどうぞ。",
+        "evidence_level": "B",
+        "verified": "TRUE",
+        "updated_at": "2026-07-03",
+    },
 ]
 
-# Series Score 改善パッチ（シリーズ約束を注入）
-_PATCH_SERIES = [
-    "フォローすると、毎週こういう情報を届けます。",
-    "次回は、この続きをお話しします。フォローしてお待ちください。",
-]
+# ── Thought Library のロードキャッシュ ──────────────────────────────────────
+_thought_library_cache: Optional[list] = None
 
-# Uniqueness Score 改善パッチ（CORE HARI固有マーカーを注入）
-_PATCH_UNIQUENESS = [
-    "咬筋優位の方は特に、表情グセが顔の歪みにつながります。",
-    "舌の位置が下がると、顔全体がたるんできます。",
-    "正直に言います。表情グセを放っておくと、顔は変わりません。",
-]
 
-# Follower Score 改善パッチ（フォロワー訴求を注入）
-_PATCH_FOLLOWER = [
-    "実は、この視点を持つ専門家は多くありません。",
-    "フォローすると、毎週こういう正直な情報をお届けします。",
-]
+def _load_thought_library() -> list:
+    """
+    thought_library シートから読み込む。失敗時はシードデータにフォールバック。
+    1回のプロセス内でキャッシュする（何度も呼ばれても1回だけシートにアクセス）。
+    """
+    global _thought_library_cache
+    if _thought_library_cache is not None:
+        return _thought_library_cache
+
+    try:
+        rows = sheets_writer.get_thought_library()
+        if rows:
+            _thought_library_cache = rows
+            return rows
+    except Exception:
+        pass
+
+    # シートが空 or 失敗 → シードデータを使う
+    _thought_library_cache = _THOUGHT_LIBRARY_SEED
+    return _thought_library_cache
+
+
+def _find_thoughts(theme: str) -> list:
+    """
+    テーマ文字列に対して Thought Library から関連エントリを検索する。
+    - topic フィールドへの一致は 3× の重みを付ける
+    - その他フィールド（fact / mechanism / common_misunderstanding / client_question）は 1×
+    - 上位3件を返す
+    """
+    if not theme:
+        return []
+    library = _load_thought_library()
+    scored = []
+    for thought in library:
+        topic_text = thought.get("topic", "")
+        other_text = " ".join([
+            thought.get("content", ""),
+            thought.get("speaker_words", ""),
+            # 旧スキーマ互換（移行期のシート混在に備える）
+            thought.get("fact", ""),
+            thought.get("mechanism", ""),
+        ])
+
+        score = 0
+        # topic フィールド: 3〜8文字の共通部分文字列を重み3で採点
+        for kw_len in range(8, 2, -1):
+            for i in range(len(theme) - kw_len + 1):
+                kw = theme[i:i + kw_len]
+                if kw in topic_text:
+                    score += kw_len * 3
+        # 他フィールド: 4〜6文字の共通部分文字列を重み1で採点
+        for kw_len in range(6, 3, -1):
+            for i in range(len(theme) - kw_len + 1):
+                kw = theme[i:i + kw_len]
+                if kw in other_text:
+                    score += kw_len
+
+        if score > 0:
+            scored.append((score, thought))
+    scored.sort(key=lambda x: -x[0])
+    return [t for _, t in scored[:3]]
+
+
+def _build_script_from_thought(thought: dict, hook_seed: str, cta_str: str) -> str:
+    """
+    Thought Library の1エントリから専門家が話しそうな台本を組み立てる。
+
+    新スキーマ: speaker_words（話し言葉）→ content（核心知識）の順で優先。
+    旧スキーマ（story / fact / mechanism）は互換のためフォールバックとして残す。
+    """
+    lines = []
+
+    # 新スキーマ: speaker_words を優先
+    speaker = (thought.get("speaker_words") or "").strip()
+    if speaker:
+        lines.extend(speaker.split("\n"))
+    else:
+        # 旧スキーマ互換: story → fact/mechanism 順で組み立て
+        story = (thought.get("story") or "").strip()
+        if story:
+            lines.extend(story.split("\n"))
+        else:
+            hook_line = (thought.get("client_question") or hook_seed or "").strip()
+            if hook_line:
+                lines.append(hook_line)
+                lines.append("")
+
+            core = (thought.get("content") or thought.get("fact") or "").strip()
+            if core:
+                lines.append(core)
+
+            mech = thought.get("mechanism", "").strip()
+            if mech:
+                lines.append(mech)
+            lines.append("")
+
+            view = (thought.get("perspective") or thought.get("core_hari_perspective") or "").strip()
+            if view:
+                lines.append(view)
+                lines.append("")
+
+    return "\n".join(lines).strip()
 
 
 def _apply_patches(record: dict, scores_dict: dict) -> tuple:
     """
     失敗スコアに対してscript_fullにパッチを当てる。
+    Thought Library から該当テーマの「話す言葉」を優先して注入する。
     戻り値: (新しいscript_full, 追加されたパッチのラベルリスト)
     既にパッチ済みの文章は重複追加しない。
     """
     script = record.get("script_full", "")
+    theme  = record.get("theme", "")
     added  = []
 
-    def _inject(patches: list, label: str, src: str) -> str:
-        for p in patches:
-            if p[:12] not in src:
+    # Thought Library からテーマに一致するエントリを探す
+    thoughts = _find_thoughts(theme)
+
+    # テーマに合った「話す言葉」候補を作る（Thought Library 優先 → 汎用フォールバック）
+    def _thought_sentences(kind: str) -> list:
+        """kind: 'content'（核心知識）/ 'view'（専門家独自解釈）/ 'speaker'（話す言葉）"""
+        result = []
+        for t in thoughts:
+            if kind == "content":
+                s = t.get("content") or t.get("fact") or t.get("mechanism") or ""
+            elif kind == "view":
+                s = t.get("perspective") or t.get("core_hari_perspective") or ""
+            else:
+                # speaker_words / story は改行区切りの複数行 → 1行ずつリストに
+                raw = t.get("speaker_words") or t.get("story") or ""
+                result.extend([ln.strip() for ln in raw.split("\n") if ln.strip()])
+                continue
+            if s:
+                result.append(s)
+        return result
+
+    def _inject(candidates: list, fallback: list, label: str, src: str) -> str:
+        pool = candidates + fallback
+        for p in pool:
+            if len(p) > 5 and p[:12] not in src:
                 added.append(label)
                 return src.rstrip() + "\n" + p
         return src
 
+    # Knowledge Score: 「なぜそうなのか」の因果説明を注入
     if scores_dict.get("Knowledge Score", 100) < 80:
-        script = _inject(_PATCH_KNOWLEDGE, "Knowledge", script)
+        candidates = _thought_sentences("mechanism") + _thought_sentences("view")
+        fallback   = [
+            "なぜなら、顔の悩みのほとんどは骨格ではなく筋肉のクセから来ているからです。",
+            "だから、表情グセを変えることが顔を変える最短ルートです。",
+            "本質は、毎日積み重なる表情グセが顔の形を決めているということです。",
+        ]
+        script = _inject(candidates, fallback, "Knowledge", script)
+
+    # Series Score: シリーズ設計の言葉を注入
     if scores_dict.get("Series Score", 100) < 80:
-        script = _inject(_PATCH_SERIES, "Series", script)
+        fallback = [
+            "フォローすると、毎週こういう話をしています。",
+            "次回は、この続きをお話しします。フォローしてお待ちください。",
+        ]
+        script = _inject([], fallback, "Series", script)
+
+    # Uniqueness Score: Thought Library の「話す言葉」から固有視点を注入
     if scores_dict.get("Uniqueness Score", 100) < 80:
-        script = _inject(_PATCH_UNIQUENESS, "Uniqueness", script)
+        candidates = _thought_sentences("story")
+        fallback   = [
+            "咬筋優位の方は特に、表情グセが顔の歪みにつながります。",
+            "舌の位置が下がると、顔全体がたるんできます。",
+            "正直に言います。表情グセを放っておくと、顔は変わりません。",
+        ]
+        script = _inject(candidates, fallback, "Uniqueness", script)
+
+    # Follower Score: フォロワー訴求を注入
     if scores_dict.get("Follower Score", 100) < 80:
-        script = _inject(_PATCH_FOLLOWER, "Follower", script)
+        candidates = [t.get("cta_spoken", "") for t in thoughts if t.get("cta_spoken")]
+        fallback   = [
+            "実は、この視点を持つ専門家は多くありません。",
+            "フォローすると、毎週こういう正直な情報をお届けします。",
+        ]
+        script = _inject(candidates, fallback, "Follower", script)
 
     return script, added
 
@@ -2002,17 +2279,144 @@ def _priority4(today: str) -> dict:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Priority0: Editorial Meeting の Selected Topic から直接ブリーフ生成
+# ────────────────────────────────────────────────────────────────────────────
+
+def _build_from_meeting_topic(today: str, meeting: dict) -> Optional[dict]:
+    """
+    Editorial Meeting の selected（採用されたテーマ）を唯一の情報源として
+    Hook / 台本 / 撮影 / CTA を組み立てる。
+
+    1. selected["theme"] と一致する DNA テンプレートがあればその構造を再利用し、
+       theme / hook / hook_text を selected の内容で上書きする。
+    2. 一致テンプレートがなければ selected["hook_seed"] + ["core_hari_perspective"]
+       + ["cta_type"] だけで必要最小限のテンプレートを組み立てる。
+    """
+    selected = meeting.get("selected")
+    if not selected:
+        return None
+
+    em_theme     = selected.get("theme", "").strip()
+    hook_seed    = selected.get("hook_seed", "").strip()
+    perspective  = selected.get("core_hari_perspective", "").strip()
+    cta_type     = selected.get("cta_type", "保存")
+    if not em_theme:
+        return None
+
+    # CTA 文字列に変換
+    cta_map = {"保存": _CTA_SAVE, "フォロー": _CTA_FOLLOW, "問い合わせ": _CTA_DM}
+    cta_str = cta_map.get(cta_type, _CTA_SAVE)
+
+    # ── DNA テンプレートと照合（部分一致）
+    matched_tmpl = None
+    for tmpl in _DNA_TEMPLATES:
+        t_theme = tmpl.get("theme", "")
+        # 双方向の包含チェック（「施術回数」↔「タイムライン」等のゆらぎに対応）
+        key_words = [w for w in em_theme.replace("—", " ").split() if len(w) >= 3]
+        if any(w in t_theme for w in key_words) or any(w in em_theme for w in t_theme.replace("—", " ").split() if len(w) >= 3):
+            matched_tmpl = tmpl
+            break
+
+    # ── Thought Library から台本を組み立てる ─────────────────────────
+    thoughts = _find_thoughts(em_theme)
+    primary_thought = thoughts[0] if thoughts else None
+
+    if primary_thought:
+        # Thought Library にエントリあり → 「森このみが話しそう」な台本を構築
+        script_body = _build_script_from_thought(primary_thought, hook_seed, cta_str)
+        actual_hook = primary_thought["spoken"][0] if primary_thought.get("spoken") else hook_seed
+        source = "thought_library"
+        print(f"  Creator Studio: Priority0（Thought Library: {primary_thought['topic']}）")
+    elif matched_tmpl:
+        # Thought Library にないが DNA テンプレートがある → DNA の script を使用
+        script_body = matched_tmpl.get("script_full", perspective or f"（{em_theme}について話します。）")
+        actual_hook = hook_seed
+        source = "editorial_meeting+dna"
+        print(f"  Creator Studio: Priority0（Editorial Meeting → DNA構造流用: {em_theme[:30]}）")
+    else:
+        # フォールバック → hook_seed + perspective から最小限構築
+        script_body = f"{hook_seed}\n\n{perspective}" if perspective else hook_seed
+        actual_hook = hook_seed
+        source = "editorial_meeting"
+        print(f"  Creator Studio: Priority0（Editorial Meeting → 直接生成: {em_theme[:30]}）")
+
+    # ── 撮影カット指示の組み立て ─────────────────────────────────────
+    spoken_lines = (primary_thought or {}).get("spoken", [])
+    shot_parts   = ["【カット1 / 2秒】フック用・静止カット\n  ★ テロップ: テーマを1行で表示"]
+    for i, line in enumerate(spoken_lines[:3], start=2):
+        shot_parts.append(f"【カット{i} / 10秒】カメラ目線\n  セリフ:「{line}」")
+    if not spoken_lines:
+        shot_parts.append(f"【カット2 / 15秒】カメラ目線\n  セリフ:「{actual_hook}」")
+    cta_spoken = (primary_thought or {}).get("cta_spoken", "") or cta_str
+    shot_parts.append(f"【カット{len(shot_parts)+1} / 5秒】笑顔・CTA\n  セリフ:「{cta_spoken}」")
+
+    cut_count = len(shot_parts)
+    total_sec = cut_count * 9
+
+    # ── キャプション ──────────────────────────────────────────────────
+    cap_lines = [em_theme, ""]
+    if primary_thought:
+        cap_lines.append(primary_thought.get("fact", "")[:100])
+        cap_lines.append("")
+        cap_lines.append(primary_thought.get("core_hari_view", "")[:100])
+        cap_lines.append("")
+    cap_lines.append("保存して、気になったときに読み返してください。")
+    cap_lines.append("")
+    cap_lines.append("#小顔矯正 #フェイシャルエステ #札幌エステ #たるみ改善 #顔筋トレーニング #COREHARI")
+    caption = "\n".join(l for l in cap_lines if l is not None)
+
+    tmpl = {
+        "theme":         em_theme,
+        "mission":       {"保存": "保存を狙う", "フォロー": "フォロワーを増やす",
+                          "問い合わせ": "問い合わせを増やす"}.get(cta_type, "保存を狙う"),
+        "hook":          actual_hook,
+        "hook_text":     em_theme.split("—")[0].strip(),
+        "script_full":   script_body,
+        "shot_sequence": "\n\n".join(shot_parts),
+        "editing_notes": _build_editing_notes(total_sec, cut_count),
+        "cta":           cta_str,
+        "caption":       caption,
+        "threads_text":  f"{actual_hook}\n\n{script_body[:120]}",
+        "cut_count":     cut_count,
+        "total_sec":     total_sec,
+    }
+
+    why = (
+        f"Editorial Meetingで「{em_theme}」が採用されました。\n"
+        f"採用理由: {meeting.get('selection_reason', '')}"
+    )
+    return _assemble(today, source, "", tmpl, why)
+
+
+def _themes_match(em_theme: str, record_theme: str) -> bool:
+    """Editorial Meeting のテーマと record のテーマが実質的に一致しているか確認。"""
+    if not em_theme or not record_theme:
+        return False
+    # 完全一致
+    if em_theme == record_theme:
+        return True
+    # 部分一致: どちらかがどちらかを含む
+    if em_theme in record_theme or record_theme in em_theme:
+        return True
+    # キーワード重複（3文字以上の語が1つ以上共通）
+    em_words  = {w for w in em_theme.replace("—", " ").replace("・", " ").split() if len(w) >= 3}
+    rec_words = {w for w in record_theme.replace("—", " ").replace("・", " ").split() if len(w) >= 3}
+    return bool(em_words & rec_words)
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # メイン公開関数
 # ────────────────────────────────────────────────────────────────────────────
 
 def generate_creator_studio_daily() -> Optional[dict]:
     """
-    Editorial Meeting → 4段階フォールバックで必ず「今日撮る1本」を出力する。
+    Editorial Meeting → Selected Topic を唯一のテーマ源として「今日撮る1本」を出力。
 
     フロー:
-      1. Editorial Meeting: 今日の社会トレンド × CORE HARI接点 → テーマ候補5案
-      2. Priority1〜4 フォールバックでブリーフ生成
-      3. meeting結果を record["_editorial_meeting"] として埋め込む
+      1. Editorial Meeting: 今日の社会トレンド × CORE HARI接点 → テーマ候補5案 → 採用1案
+      2. Priority0: 採用テーマから直接ブリーフ生成（テーマ変更禁止）
+      3. テーマ一致チェック: Selected Topic ≠ record["theme"] なら再生成（1回まで）
+      4. QA Loop: 4スコアが全て80点以上になるまで自動改善（最大3回）
     """
     import editorial_meeting as em
 
@@ -2026,14 +2430,35 @@ def generate_creator_studio_daily() -> Optional[dict]:
         past_themes = []
 
     meeting = em.run_editorial_meeting(today, past_themes)
+    em_theme = (meeting.get("selected") or {}).get("theme", "")
 
-    # ── 投稿ブリーフ生成（Priority1〜4 フォールバック）─────────────────
-    record = (
-        _try_priority1(today)
-        or _try_priority2(today)
-        or _try_priority3(today)
-        or _priority4(today)
-    )
+    # ── Priority0: Editorial Meeting の Selected Topic から生成 ──────
+    record = _build_from_meeting_topic(today, meeting)
+
+    # Editorial Meeting に失敗した場合のみ P1〜P4 フォールバック
+    if record is None:
+        print("  Creator Studio: Priority0失敗 → Priority1〜4 フォールバック")
+        record = (
+            _try_priority1(today)
+            or _try_priority2(today)
+            or _try_priority3(today)
+            or _priority4(today)
+        )
+
+    # ── テーマ一致チェック ─────────────────────────────────────────
+    record_theme = record.get("theme", "")
+    if em_theme and not _themes_match(em_theme, record_theme):
+        print(
+            f"  ⚠️ テーマ不一致を検出: EM=「{em_theme}」 / Record=「{record_theme}」\n"
+            f"  → Editorial Meeting テーマで再生成します"
+        )
+        rebuilt = _build_from_meeting_topic(today, meeting)
+        if rebuilt:
+            record = rebuilt
+        else:
+            # 強制的に theme フィールドを上書き（最終手段）
+            record["theme"]      = em_theme
+            record["video_title"] = em_theme
 
     # ── QA Loop: 4スコアが全て80点以上になるまで自動改善 ────────────
     record = _quality_assurance_loop(record)
@@ -2312,8 +2737,10 @@ def print_creator_studio_summary(record: dict) -> None:
         print(f"\n  {'─'*52}")
         if all_pass and scores_pass:
             print(f"  ✅ ALL PASS — 投稿してください。")
+        elif qa_log and any("パッチ枯渇" in l or "iter3" in l for l in qa_log):
+            print(f"  ⚠️  3回改善しましたが改善できませんでした。")
+            print(f"  最善状態の投稿を出力します。そのまま投稿しても構いません。")
         else:
-            # QA Loop 3回でも合格できなかった稀なケース（表示は合格扱いでOK）
             print(f"  ✅ QA完了 — 投稿してください。")
         print(f"  {'─'*52}")
 

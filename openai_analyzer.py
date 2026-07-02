@@ -175,18 +175,25 @@ def _normalize_list_field(value, count: int = CATEGORY_ANALYSIS_LIST_COUNT) -> l
     return items[:count]
 
 
-def _call_openai(user_prompt: str, system_prompt: str = SYSTEM_PROMPT) -> str:
-    client = _get_client()
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.8,
-        response_format={"type": "json_object"},
-    )
-    return response.choices[0].message.content or ""
+def _call_openai(user_prompt: str, system_prompt: str = SYSTEM_PROMPT, label: str = "OpenAI") -> str:
+    print(f"[API START] {label}")
+    try:
+        client = _get_client()
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.8,
+            response_format={"type": "json_object"},
+            timeout=60,
+        )
+        print(f"[API END] {label}")
+        return response.choices[0].message.content or ""
+    except Exception as e:
+        print(f"[API TIMEOUT] {label} skipped: {e}")
+        raise
 
 
 def analyze_category_trend(category_label: str, posts: list) -> dict:
@@ -198,7 +205,7 @@ def analyze_category_trend(category_label: str, posts: list) -> dict:
             CATEGORY_ANALYSIS_LIST_KEYS の各キー(10件の文字列リスト)を含む辞書。
     """
     prompt = build_category_analysis_prompt(category_label, posts or [])
-    content = _call_openai(prompt)
+    content = _call_openai(prompt, label=f"category trend ({category_label})")
 
     all_keys = CATEGORY_ANALYSIS_TEXT_KEYS + CATEGORY_ANALYSIS_LIST_KEYS
     parsed = _parse_response_content(content, all_keys)
@@ -222,7 +229,7 @@ def analyze_post_structure(post: dict) -> dict:
     戻り値: POST_ANALYSIS_TEXT_KEYS の各キー(文字列)を含む辞書。
     """
     prompt = build_post_structure_analysis_prompt(post or {})
-    content = _call_openai(prompt, system_prompt=POST_ANALYSIS_SYSTEM_PROMPT)
+    content = _call_openai(prompt, system_prompt=POST_ANALYSIS_SYSTEM_PROMPT, label=f"post structure ({post.get('username','')})")
 
     parsed = _parse_response_content(content, POST_ANALYSIS_TEXT_KEYS)
 
@@ -243,7 +250,7 @@ def generate_core_hari_idea(post: dict, analysis: dict) -> dict:
     戻り値: CORE_HARI_IDEA_TEXT_KEYS の各キー(文字列)を含む辞書。
     """
     prompt = build_core_hari_idea_prompt(post or {}, analysis or {})
-    content = _call_openai(prompt, system_prompt=CORE_HARI_IDEA_SYSTEM_PROMPT)
+    content = _call_openai(prompt, system_prompt=CORE_HARI_IDEA_SYSTEM_PROMPT, label=f"core hari idea ({post.get('username','')})")
 
     parsed = _parse_response_content(content, CORE_HARI_IDEA_TEXT_KEYS)
 
@@ -268,7 +275,7 @@ def analyze_success_factors(post: dict) -> dict:
     戻り値: SUCCESS_FACTOR_TEXT_KEYS の各キー(文字列)を含む辞書。
     """
     prompt = build_success_factor_prompt(post or {})
-    content = _call_openai(prompt, system_prompt=SUCCESS_FACTOR_SYSTEM_PROMPT)
+    content = _call_openai(prompt, system_prompt=SUCCESS_FACTOR_SYSTEM_PROMPT, label=f"success factors ({post.get('username','')})")
 
     parsed = _parse_response_content(content, SUCCESS_FACTOR_TEXT_KEYS)
 
@@ -292,7 +299,7 @@ def generate_pattern_lab_content(post: dict, success_factors: dict) -> dict:
     戻り値: PATTERN_LAB_TEXT_KEYS の各キー(文字列)を含む辞書。
     """
     prompt = build_pattern_lab_prompt(post or {}, success_factors or {})
-    content = _call_openai(prompt, system_prompt=PATTERN_LAB_SYSTEM_PROMPT)
+    content = _call_openai(prompt, system_prompt=PATTERN_LAB_SYSTEM_PROMPT, label=f"pattern lab ({post.get('username','')})")
 
     parsed = _parse_response_content(content, PATTERN_LAB_TEXT_KEYS)
 
@@ -330,7 +337,7 @@ def generate_north_star_daily(entries: list, validated_patterns: list = None) ->
         return {key: "" for key in NORTH_STAR_DAILY_TEXT_KEYS}
 
     prompt = build_north_star_daily_prompt(entries, validated_patterns=validated_patterns or [])
-    content = _call_openai(prompt, system_prompt=NORTH_STAR_DAILY_SYSTEM_PROMPT)
+    content = _call_openai(prompt, system_prompt=NORTH_STAR_DAILY_SYSTEM_PROMPT, label="north star daily")
 
     parsed = _parse_response_content(content, NORTH_STAR_DAILY_AI_KEYS)
 
