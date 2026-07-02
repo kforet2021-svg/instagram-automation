@@ -9,6 +9,7 @@ creator_studio.py
 【2026-07-02(3回目): ⑪CEO Challengeに「他サロンでも言えるか？」ゲートを追加 — NOになるまで改善】
 【2026-07-02(4回目): ⑫Follower Growth Check追加 — 最優先KPI（フォロワーが増える投稿か？）4項目判定】
 【2026-07-02(5回目): ⑬Audience Thinking追加 — 視聴者の頭の中を5項目で分析・施術者目線チェック】
+【2026-07-02(6回目): KPI設計追加 — フォロワー/保存/問い合わせ/信頼を最初に選択・Follower Score(100点)追加・80点未満は再生成促進】
 
 目的：Creator Studioを開いたら5分以内に撮影を開始できる状態を作る。
       分析結果の表示ではなく、今日そのまま使える撮影指示書として出力する。
@@ -1133,10 +1134,57 @@ def _generate_ceo_challenge(record: dict, review: dict) -> dict:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# ⑫ Follower Growth Check — 最優先KPI
+# KPI 定義
+#
+# 投稿生成の最初に「この投稿で増やしたいのは何か」を1つ決める。
+# Hook・構成・CTAはすべてそのKPIに合わせて設計する。
+# ────────────────────────────────────────────────────────────────────────────
+
+_KPI_TYPES = {
+    "フォロワー": {
+        "label": "フォロワー増加",
+        "desc":  "続きも見たい・この人しか言わない・シリーズ化できる",
+        "cta_style": "フォローCTA（明示）+ シリーズ予告",
+        "hook_style": "視聴者が「自分のことだ」と思うフック",
+    },
+    "保存": {
+        "label": "保存率",
+        "desc":  "見返したくなる情報密度・リスト型・チェックリスト型",
+        "cta_style": "保存CTA（「保存して読み返して」）",
+        "hook_style": "「これは保存しておきたい」情報提示",
+    },
+    "問い合わせ": {
+        "label": "問い合わせ・予約",
+        "desc":  "具体的な変化・信頼・背中を押す情報",
+        "cta_style": "問い合わせCTA（プロフリンク誘導）",
+        "hook_style": "「私も変われるかも」と思わせるフック",
+    },
+    "信頼": {
+        "label": "信頼・権威性",
+        "desc":  "正直さ・専門性・他サロンとの差別化",
+        "cta_style": "フォローCTA または 保存CTA",
+        "hook_style": "「この人は本物だ」と感じさせる切り口",
+    },
+}
+
+
+def _select_kpi(mission: str) -> str:
+    """mission文字列から最優先KPIを1つ選択して返す。"""
+    if "フォロー" in mission:
+        return "フォロワー"
+    if "問い合わせ" in mission or "予約" in mission:
+        return "問い合わせ"
+    if "信頼" in mission or "権威" in mission:
+        return "信頼"
+    return "保存"
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# ⑫ Primary KPI Check — KPI別評価 + Follower Score
 #
 # Creator Studio の最優先 KPI は「フォロワーが増える投稿」。
-# 問い合わせはその次。4項目すべて YES でなければ再生成。
+# Follower投稿は4条件を満たし、Follower Score 80点以上が必須。
+# 他KPI投稿も基本条件（専門性・視聴者目線）をチェックする。
 # ────────────────────────────────────────────────────────────────────────────
 
 # ①「役に立ちそう」を示す専門マーカー
@@ -1235,6 +1283,114 @@ def _check_follower_growth(record: dict) -> dict:
         "_curiosity_count": curiosity_count,
         "_has_series":      has_series,
         "_has_follow_cta":  has_follow_cta,
+    }
+
+
+def _compute_follower_score(record: dict, fg: dict) -> dict:
+    """
+    Follower Score — フォロワー増加投稿の品質を100点満点で自己採点。
+
+    採点基準:
+      A. 続きも見たい感（30点）
+         - シリーズ明示あり              +15pt
+         - 好奇心フックが2件以上         +15pt
+         - 好奇心フックが1件のみ         + 8pt
+      B. この人しか言わない視点（30点）
+         - CORE HARI固有マーカー2件以上  +30pt
+         - CORE HARI固有マーカー1件のみ  +18pt
+      C. 専門家として記憶に残る（25点）
+         - 専門マーカー3件以上           +25pt
+         - 専門マーカー2件               +18pt
+         - 専門マーカー1件               +10pt
+      D. シリーズ化できるテーマ（15点）
+         - フォローCTA明示               +15pt
+         - 毎週・定期的ワード            + 8pt
+    """
+    combined = " ".join([
+        record.get("hook", ""),
+        record.get("script_full", ""),
+        record.get("cta", ""),
+        record.get("caption", ""),
+    ])
+
+    useful_count    = fg.get("_useful_count", 0)
+    unique_count    = fg.get("_unique_count", 0)
+    curiosity_count = fg.get("_curiosity_count", 0)
+    has_series      = fg.get("_has_series", False)
+    has_follow_cta  = fg.get("_has_follow_cta", False)
+
+    # A. 続きも見たい感（30点）
+    if has_series and curiosity_count >= 2:
+        score_a = 30
+    elif has_series or curiosity_count >= 2:
+        score_a = 20
+    elif curiosity_count == 1:
+        score_a = 12
+    else:
+        score_a = 0
+
+    # B. この人しか言わない視点（30点）
+    if unique_count >= 2:
+        score_b = 30
+    elif unique_count == 1:
+        score_b = 18
+    else:
+        score_b = 0
+
+    # C. 専門家として記憶に残る（25点）
+    if useful_count >= 3:
+        score_c = 25
+    elif useful_count == 2:
+        score_c = 18
+    elif useful_count == 1:
+        score_c = 10
+    else:
+        score_c = 0
+
+    # D. シリーズ化できるテーマ（15点）
+    if has_follow_cta:
+        score_d = 15
+    elif has_series:
+        score_d = 8
+    else:
+        score_d = 0
+
+    total = score_a + score_b + score_c + score_d
+
+    breakdown = {
+        "A.続きも見たい感(30)":          score_a,
+        "B.この人しか言わない視点(30)":   score_b,
+        "C.専門家として記憶に残る(25)":   score_c,
+        "D.シリーズ化できるテーマ(15)":   score_d,
+    }
+
+    # 80点未満の場合の改善アドバイス
+    advice_items = []
+    if score_a < 20:
+        advice_items.append(
+            "【A】「フォローすると毎週〜」をscript_fullの末尾に追加 +"
+            " 「実は」「正直に言います」を2か所以上入れる"
+        )
+    if score_b < 18:
+        advice_items.append(
+            "【B】咬筋優位・舌の位置・表情グセ・「骨格の大きさは変わりません」など"
+            "CORE HARI固有の視点を2つ以上入れる"
+        )
+    if score_c < 18:
+        advice_items.append(
+            "【C】専門マーカー（咬筋・表情グセ・舌の位置・表情筋・正直に言います）を"
+            "3件以上使う"
+        )
+    if score_d < 8:
+        advice_items.append(
+            "【D】「フォローすると、毎週こういう情報を届けます。」を明示する"
+        )
+
+    return {
+        "score":      total,
+        "breakdown":  breakdown,
+        "pass":       total >= 80,
+        "advice":     advice_items,
     }
 
 
@@ -1402,13 +1558,20 @@ def _assemble(today: str, source_type: str, source_url: str,
         "feedback_url_placeholder": "（投稿後にURLを記入）",
     }
 
-    # ⑨〜⑫ をレコードに埋め込む（"_" プレフィックスで sheets_writer には書かれない）
+    # KPI を最初に決定（"_" プレフィックスで sheets_writer には書かれない）
+    kpi_key = _select_kpi(record["today_mission"])
+    record["_kpi"] = {"key": kpi_key, **_KPI_TYPES[kpi_key]}
+
+    # ⑨〜⑬ をレコードに埋め込む
     lateral_data = _LATERAL_THINKING.get(theme, _LATERAL_FALLBACK)
     record["_lateral"]          = lateral_data
     review = _compute_creator_review(record)
     record["_creator_review"]   = review
     record["_ceo_challenge"]    = _generate_ceo_challenge(record, review)
-    record["_follower_growth"]    = _check_follower_growth(record)    # ⑫ 最優先KPI
+    fg = _check_follower_growth(record)
+    record["_follower_growth"]    = fg                                 # ⑫ 最優先KPI
+    if kpi_key == "フォロワー":
+        record["_follower_score"] = _compute_follower_score(record, fg)
     record["_audience_thinking"]  = _check_audience_thinking(record)  # ⑬ 視聴者の頭の中
 
     return record
@@ -1662,8 +1825,14 @@ def print_creator_studio_summary(record: dict) -> None:
             print(f"{pad}{line}")
 
     # ── ヘッダー ──────────────────────────────────────────────────────
+    kpi     = record.get("_kpi", {})
+    kpi_key = kpi.get("key", "保存")
+    kpi_icons = {"フォロワー": "👥", "保存": "🔖", "問い合わせ": "📩", "信頼": "🤝"}
+    kpi_icon  = kpi_icons.get(kpi_key, "")
+
     print(f"\n{THICK}")
     print(f"  今日の撮影指示書  [{source_label}]")
+    print(f"  ━ 最優先KPI: {kpi_icon} {kpi.get('label', kpi_key)}  ━  {kpi.get('desc', '')}")
     print(f"  目的: {record.get('today_mission', '')}")
     print(THICK)
 
@@ -1806,30 +1975,77 @@ def print_creator_studio_summary(record: dict) -> None:
             body(improve, indent=4)
             print(f"  {'─'*50}")
 
-    # ── ⑫ Follower Growth Check ─────────────────────────────────
-    fg = record.get("_follower_growth", {})
+    # ── ⑫ Primary KPI Check ──────────────────────────────────────
+    fg      = record.get("_follower_growth", {})
+    fs      = record.get("_follower_score", {})
+    kpi_chk = record.get("_kpi", {})
+    kpi_k   = kpi_chk.get("key", "保存")
+
     if fg:
-        sec("⑫", "Follower Growth Check【最優先KPI: フォロワーが増える投稿か？】")
-        items  = fg.get("items", {})
-        advice = fg.get("advice", {})
-        all_yes = fg.get("all_yes", False)
+        sec("⑫", f"Primary KPI Check【{kpi_icons.get(kpi_k,'')} {kpi_chk.get('label', kpi_k)}】")
 
-        print()
-        for label, ok in items.items():
-            icon = "✅ YES" if ok else "❌ NO "
-            print(f"  {icon}  {label}")
+        # ── Follower 投稿: 4条件 + Follower Score ──────────────────
+        if kpi_k == "フォロワー":
+            print(f"\n  【Follower投稿の4条件】")
+            items   = fg.get("items", {})
+            advice  = fg.get("advice", {})
+            all_yes = fg.get("all_yes", False)
+            for label, ok in items.items():
+                icon = "✅ YES" if ok else "❌ NO "
+                print(f"  {icon}  {label}")
 
-        print(f"\n  {'─'*50}")
-        if all_yes:
-            print(f"  ✅ PASS — この投稿はフォロワーを増やせます。投稿してください。")
+            # Follower Score
+            if fs:
+                score    = fs.get("score", 0)
+                score_pass = fs.get("pass", False)
+                bar_filled = "█" * (score // 10)
+                bar_empty  = "░" * (10 - score // 10)
+                print(f"\n  【Follower Score】")
+                print(f"  {bar_filled}{bar_empty}  {score} / 100点")
+                breakdown = fs.get("breakdown", {})
+                for dim, pts in breakdown.items():
+                    print(f"    {dim}: {pts}点")
+
+                print(f"\n  {'─'*50}")
+                if all_yes and score_pass:
+                    print(f"  ✅ PASS — フォロワーが増える投稿です。投稿してください。")
+                else:
+                    if not all_yes:
+                        no_labels = [l for l, ok in items.items() if not ok]
+                        print(f"  ❌ FAIL — 4条件NG（{len(no_labels)}項目）+ 再生成してください")
+                    elif not score_pass:
+                        print(f"  ❌ FAIL — Follower Score {score}点（80点未満）+ 再生成してください")
+                    if advice:
+                        print(f"\n  【4条件の改善アクション】")
+                        for q_key, hint in advice.items():
+                            print(f"\n  {q_key}:")
+                            body(hint, indent=4)
+                    score_advice = fs.get("advice", [])
+                    if score_advice:
+                        print(f"\n  【Follower Scoreの改善アクション】")
+                        for a in score_advice:
+                            body(a, indent=4)
+                print(f"  {'─'*50}")
+
+        # ── 保存・問い合わせ・信頼 投稿: 基本4条件のみ表示 ────────────
         else:
-            no_labels = [label for label, ok in items.items() if not ok]
-            print(f"  ❌ FAIL — 再生成が必要です（NOが{len(no_labels)}項目）")
-            print(f"\n  【改善アクション】")
-            for q_key, hint in advice.items():
-                print(f"\n  {q_key}:")
-                body(hint, indent=4)
-        print(f"  {'─'*50}")
+            items   = fg.get("items", {})
+            advice  = fg.get("advice", {})
+            all_yes = fg.get("all_yes", False)
+            print()
+            for label, ok in items.items():
+                icon = "✅ YES" if ok else "❌ NO "
+                print(f"  {icon}  {label}")
+            print(f"\n  {'─'*50}")
+            if all_yes:
+                print(f"  ✅ PASS — 専門性・視聴者目線ともにOKです。")
+            else:
+                no_labels = [l for l, ok in items.items() if not ok]
+                print(f"  ⚠️  {len(no_labels)}項目が未達（フォロワー投稿ではないため再生成は任意）")
+                for q_key, hint in advice.items():
+                    print(f"\n  {q_key}:")
+                    body(hint, indent=4)
+            print(f"  {'─'*50}")
 
     # ── ⑬ Audience Thinking ──────────────────────────────────────
     at = record.get("_audience_thinking", {})
