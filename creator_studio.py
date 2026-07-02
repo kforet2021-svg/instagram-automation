@@ -11,6 +11,7 @@ creator_studio.py
 【2026-07-02(5回目): ⑬Audience Thinking追加 — 視聴者の頭の中を5項目で分析・施術者目線チェック】
 【2026-07-02(6回目): KPI設計追加 — フォロワー/保存/問い合わせ/信頼を最初に選択・Follower Score(100点)追加・80点未満は再生成促進】
 【2026-07-02(7回目): Follower Intelligence全面刷新 — 5ステップ生成フロー＋5ゲート品質チェック＋4スコア自己採点。「情報提供」から「考え方・視点・シリーズ設計」へ転換】
+【2026-07-02(8回目): Editorial Meeting追加 — Creator Studio前段に「今日のテーマ会議」を実装。社会トレンド×CORE HARI接点→5案→採用理由の説明を必須化】
 
 目的：Creator Studioを開いたら5分以内に撮影を開始できる状態を作る。
       分析結果の表示ではなく、今日そのまま使える撮影指示書として出力する。
@@ -1884,15 +1885,37 @@ def _priority4(today: str) -> dict:
 # ────────────────────────────────────────────────────────────────────────────
 
 def generate_creator_studio_daily() -> Optional[dict]:
-    """4段階フォールバックで必ず「今日撮る1本」を出力する。"""
+    """
+    Editorial Meeting → 4段階フォールバックで必ず「今日撮る1本」を出力する。
+
+    フロー:
+      1. Editorial Meeting: 今日の社会トレンド × CORE HARI接点 → テーマ候補5案
+      2. Priority1〜4 フォールバックでブリーフ生成
+      3. meeting結果を record["_editorial_meeting"] として埋め込む
+    """
+    import editorial_meeting as em
+
     today = datetime.date.today().isoformat()
 
+    # ── Editorial Meeting: テーマ選定前の「今日の会議」───────────────
+    try:
+        records_30d = sheets_writer.get_recent_creator_studio_records(days=7)
+        past_themes = [r.get("theme", "") for r in records_30d if r.get("date") != today]
+    except Exception:
+        past_themes = []
+
+    meeting = em.run_editorial_meeting(today, past_themes)
+
+    # ── 投稿ブリーフ生成（Priority1〜4 フォールバック）─────────────────
     record = (
         _try_priority1(today)
         or _try_priority2(today)
         or _try_priority3(today)
         or _priority4(today)
     )
+
+    # Editorial Meeting の結果を record に埋め込む（sheets_writer には書かれない）
+    record["_editorial_meeting"] = meeting
 
     try:
         sheets_writer.save_creator_studio_daily(record)
@@ -1908,6 +1931,13 @@ def generate_creator_studio_daily() -> Optional[dict]:
 # ────────────────────────────────────────────────────────────────────────────
 
 def print_creator_studio_summary(record: dict) -> None:
+    import editorial_meeting as em
+
+    # ── Editorial Meeting を最初に表示 ───────────────────────────────
+    meeting = record.get("_editorial_meeting")
+    if meeting:
+        em.print_editorial_meeting(meeting)
+
     W = 64
     THICK = "━" * W
     THIN  = "─" * W
