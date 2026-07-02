@@ -8,6 +8,7 @@ creator_studio.py
 【2026-07-02(2回目): ⑨水平思考・⑩Creator Review・⑪CEO Challengeを追加（OpenAIコストゼロ）】
 【2026-07-02(3回目): ⑪CEO Challengeに「他サロンでも言えるか？」ゲートを追加 — NOになるまで改善】
 【2026-07-02(4回目): ⑫Follower Growth Check追加 — 最優先KPI（フォロワーが増える投稿か？）4項目判定】
+【2026-07-02(5回目): ⑬Audience Thinking追加 — 視聴者の頭の中を5項目で分析・施術者目線チェック】
 
 目的：Creator Studioを開いたら5分以内に撮影を開始できる状態を作る。
       分析結果の表示ではなく、今日そのまま使える撮影指示書として出力する。
@@ -1238,6 +1239,131 @@ def _check_follower_growth(record: dict) -> dict:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# ⑬ Audience Thinking — 視聴者の頭の中を5項目で分析
+#
+# 投稿を施術者目線ではなく視聴者目線で評価する。
+# Gate4（施術者目線）YES → 再生成
+# Gate5（視聴者の本音から開始）NO → Hook作り直し
+# ────────────────────────────────────────────────────────────────────────────
+
+def _check_audience_thinking(record: dict) -> dict:
+    """
+    視聴者がこの投稿に接触したとき何が起きるかを5項目で分析する。
+
+    1. 最初の感情（hook分析）
+    2. 続きを見たくなる理由（情報ギャップ・リスト構造・信頼）
+    3. 最後に取る行動（CTA分析）
+    4. 施術者目線になっていないか（YES → 要再生成）
+    5. 視聴者の本音から始まっているか（NO → Hook作り直し）
+
+    新しいOpenAI呼び出しゼロ。ルールベース。
+    """
+    hook        = record.get("hook", "")
+    script      = record.get("script_full", "")
+    cta         = record.get("cta", "")
+    hook_line1  = hook.strip().split("\n")[0].strip()   # フック冒頭の1行目
+
+    # ── 1. 視聴者の最初の感情 ───────────────────────────────────────
+    if "？" in hook or "ですか" in hook or "ませんか" in hook:
+        first_feeling = "「あ、これ私のことだ」という自己関連性の強い反応。\n止まって見る動機が最も高い状態。"
+    elif any(w in hook for w in ["老けた", "老け", "悩み", "気になる", "不安", "左右差"]):
+        first_feeling = "「わかる…」という深い共感。\n解決策への期待と、「自分だけじゃなかった」という安心感。"
+    elif any(w in hook for w in ["正直に", "実は", "本当は"]):
+        first_feeling = "「え、そうなの？」という軽い驚き。\n常識を覆される予感から来る好奇心。"
+    elif "初めて" in hook or "当日" in hook or "不安" in hook:
+        first_feeling = "「知らなかった、聞いてよかった」という安堵感。\n情報の受け取り体勢が最も高い状態。"
+    else:
+        first_feeling = "「なんか役に立ちそう」という漠然とした関心。\nフックを疑問形に変えると停止率が上がる可能性あり。"
+
+    # ── 2. 続きを見たくなる理由 ─────────────────────────────────────
+    combined = f"{hook} {script}"
+    if "？" in hook or any(w in hook for w in ["ますか", "ませんか", "でしょうか"]):
+        keep_watching = "フックで生まれた「答えが知りたい」という情報ギャップが閉じていないため。\n答えは動画本編にしかない、という構造になっている。"
+    elif any(w in combined for w in ["正直に言います", "正直に", "本当のことを"]):
+        keep_watching = "「いつもと違う本音が聞ける」という信頼感。\n誤魔化さずに話してくれそうな予感が、最後まで見る動機になる。"
+    elif any(w in combined for w in ["1つ目", "2つ目", "1回目", "3回目", "まず", "次が", "最後"]):
+        keep_watching = "リスト・ステップ構造による「全部聞きたい」という完読欲。\n「次は何？」が自動的に生まれる構成になっている。"
+    else:
+        keep_watching = "専門家から直接語りかけられる「自分ごと感」。\nフックに疑問形を加えると、情報ギャップ効果で停止率が上がる。"
+
+    # ── 3. 最後に取る行動 ───────────────────────────────────────────
+    if "保存して" in cta:
+        final_action = "動画を保存する（後で読み返すため）。\n→ 保存後にプロフィールを確認し、フォローに繋がるケースが多い。"
+    elif "フォローすると" in cta or "フォローして" in cta:
+        final_action = "フォローする（毎週情報を受け取るため）。\n→ 最も直接的なフォロワー獲得CTA。"
+    elif "プロフィールのリンク" in cta or "ご予約" in cta or "ご相談" in cta:
+        final_action = "プロフィールを確認し、予約・問い合わせを検討する。\n→ 温かいリード（検討段階のお客様）を獲得できるCTA。"
+    else:
+        final_action = "コメント・保存・フォローのいずれかを検討する（CTA不明確）。\n→ 行動を1つに絞ることで転換率が上がる。"
+
+    # ── 4. 施術者目線チェック ────────────────────────────────────────
+    # 「」で視聴者の声を引用していればセーフ。それ以外でサロン名・一人称から始まる → 施術者目線
+    practitioner_starts = ["施術は", "CORE HARI", "私たちは", "私たちの", "私が", "私は",
+                           "当サロン", "施術では", "施術の"]
+    quoted_start = hook_line1.startswith("「") or hook_line1.startswith("『")
+    is_practitioner_pov = (
+        not quoted_start
+        and any(hook_line1.startswith(p) for p in practitioner_starts)
+    )
+
+    pov_advice = ""
+    if is_practitioner_pov:
+        pov_advice = (
+            "フックが「施術者が伝えたいこと」から始まっています。再生成が必要です。\n\n"
+            "【修正の方向性】\n"
+            "  Before: 「施術は〜にアプローチしています」\n"
+            "  After:  「『小顔矯正って何をするの？』よく聞かれます。正直に答えます。」\n\n"
+            "視聴者が心の中で思っていることを最初の一文に置いてください。\n"
+            "「〜って思っていませんか？」「〜が気になってませんか？」から始めると効果的です。"
+        )
+
+    # ── 5. 視聴者の本音チェック ─────────────────────────────────────
+    # フックに視聴者の内声（本音・疑問・悩み）が含まれているか
+    viewer_voice_signals = [
+        "「",               # 視聴者の声を引用
+        "？",               # 疑問（視聴者の疑問を代弁）
+        "老けた", "老け",    # 視聴者のリアルな感覚
+        "気がする",         # 曖昧だが本音の感覚
+        "気になる", "気になっ",
+        "不安",
+        "左右差",
+        "骨格だから",
+        "何回",
+        "初めて",
+        "無意識",
+        "悩み",
+    ]
+    # フック全体で判定（冒頭1文目だけでなく全体）
+    has_viewer_voice = any(sig in hook for sig in viewer_voice_signals)
+
+    hook_advice = ""
+    if not has_viewer_voice:
+        hook_advice = (
+            "Hookが視聴者の本音（内声・疑問・悩み）から始まっていません。\n"
+            "Hookを作り直してください。\n\n"
+            "【修正の方向性】\n"
+            "  NG: 「施術は〜」「私たちは〜」（施術者の説明から始まる）\n"
+            "  OK: 「〜って思っていませんか？」（視聴者の疑問を代弁する）\n"
+            "  OK: 「〜が気になってませんか？」（視聴者の悩みから始める）\n"
+            "  OK: 「最近、〜気がする…」（視聴者の感覚を最初に置く）\n\n"
+            "視聴者が「え、自分のことだ」と思う言葉を冒頭に置いてください。"
+        )
+
+    all_pass = (not is_practitioner_pov) and has_viewer_voice
+
+    return {
+        "first_feeling":       first_feeling,
+        "keep_watching":       keep_watching,
+        "final_action":        final_action,
+        "is_practitioner_pov": is_practitioner_pov,
+        "has_viewer_voice":    has_viewer_voice,
+        "pov_advice":          pov_advice,
+        "hook_advice":         hook_advice,
+        "all_pass":            all_pass,
+    }
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # レコード組み立て
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -1282,7 +1408,8 @@ def _assemble(today: str, source_type: str, source_url: str,
     review = _compute_creator_review(record)
     record["_creator_review"]   = review
     record["_ceo_challenge"]    = _generate_ceo_challenge(record, review)
-    record["_follower_growth"]  = _check_follower_growth(record)  # ⑫ 最優先KPI
+    record["_follower_growth"]    = _check_follower_growth(record)    # ⑫ 最優先KPI
+    record["_audience_thinking"]  = _check_audience_thinking(record)  # ⑬ 視聴者の頭の中
 
     return record
 
@@ -1702,6 +1829,39 @@ def print_creator_studio_summary(record: dict) -> None:
             for q_key, hint in advice.items():
                 print(f"\n  {q_key}:")
                 body(hint, indent=4)
+        print(f"  {'─'*50}")
+
+    # ── ⑬ Audience Thinking ──────────────────────────────────────
+    at = record.get("_audience_thinking", {})
+    if at:
+        sec("⑬", "Audience Thinking【視聴者の頭の中】")
+        print()
+        print(f"  1. 最初に何を感じるか  : {at.get('first_feeling', '—')}")
+        print(f"  2. 続きを見たくなる理由: {at.get('keep_watching', '—')}")
+        print(f"  3. 最後に取る行動      : {at.get('final_action', '—')}")
+
+        pov_ok   = not at.get("is_practitioner_pov", False)
+        voice_ok = at.get("has_viewer_voice", False)
+        all_pass = at.get("all_pass", False)
+        print()
+        pov_icon = "✅" if pov_ok   else "❌"
+        voc_icon = "✅" if voice_ok else "❌"
+        print(f"  {pov_icon}  4. 施術者目線になっていないか: {'OK' if pov_ok else 'NG — Hookを視聴者目線に直してください'}")
+        print(f"  {voc_icon}  5. 視聴者の本音から始まっているか: {'OK' if voice_ok else 'NG — Hookを作り直してください'}")
+
+        print(f"\n  {'─'*50}")
+        if all_pass:
+            print(f"  ✅ PASS — 視聴者目線でOKです。")
+        else:
+            print(f"  ❌ FAIL — Hookの修正が必要です。")
+            advice_pov   = at.get("pov_advice", "")
+            advice_hook  = at.get("hook_advice", "")
+            if advice_pov:
+                print(f"\n  【施術者目線ゲート】")
+                body(advice_pov, indent=4)
+            if advice_hook:
+                print(f"\n  【視聴者の本音ゲート】")
+                body(advice_hook, indent=4)
         print(f"  {'─'*50}")
 
     print(f"\n{THICK}\n")
