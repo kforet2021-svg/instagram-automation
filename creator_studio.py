@@ -857,104 +857,123 @@ _LATERAL_FALLBACK = {
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# ⑩ Creator Review — 10項目自己採点（ルールベース、OpenAIコストゼロ）
+# ⑩ Creator Review — 7スコア評価（ルールベース、OpenAIコストゼロ）
+#
+# 評価順:
+#   ① Audience Stop   最初の3秒で止まるか  ← 最重要。80点未満は自動再生成
+#   ② Curiosity       続きを見たくなるか
+#   ③ Emotional Hook  自分のことだと思うか
+#   ④ Save Value      保存したくなるか
+#   ⑤ Follow Value    この人をフォローしたくなるか
+#   ⑥ Expert Thinking 専門家の思考が見えるか
+#   ⑦ Brand           ブランドラインを守っているか
+#
+# 専門性より「見たくなること」を優先する。
 # ────────────────────────────────────────────────────────────────────────────
 
 def _compute_creator_review(record: dict) -> dict:
     hook        = record.get("hook", "")
     script      = record.get("script_full", "")
     cta         = record.get("cta", "")
-    shot_seq    = record.get("shot_sequence", "")
     brand_score = int(record.get("brand_score", "80") or 80)
-    cuts        = int(record.get("shooting_cuts", "6") or 6)
     combined    = f"{hook} {script} {cta}"
 
-    # 1. フック: 疑問形・共感語があるか
-    hook_q = any(c in hook for c in ["？", "ですか", "ませんか", "でしょうか"])
-    hook_e = any(w in hook for w in ["気がする", "かもしれ", "悩み", "不安", "方へ"])
-    s_hook = 90 if hook_q else (85 if hook_e else 72)
+    # ① Audience Stop: 最初の3秒で止まるか
+    # 疑問形・数字・強い断言・「え？」系ワードでスクロールが止まる
+    stop_q      = any(c in hook for c in ["？", "ですか", "ませんか", "でしょうか"])
+    stop_num    = any(c.isdigit() for c in hook)
+    stop_shock  = any(w in hook for w in ["実は", "正直に言います", "知っていますか", "思っていませんか",
+                                           "え？", "それ、", "多くの方が", "勘違い"])
+    stop_empathy = any(w in hook for w in ["悩み", "不安", "気になる", "方へ", "気がする", "変わらない"])
+    s_audience_stop = 60
+    if stop_q:       s_audience_stop += 15
+    if stop_num:     s_audience_stop += 10
+    if stop_shock:   s_audience_stop += 15
+    if stop_empathy: s_audience_stop += 10
+    s_audience_stop = min(100, s_audience_stop)
 
-    # 2. 専門性: CORE HARI固有ワード（咬筋・舌の位置・表情グセは+6点）
-    expert_words_base = ["筋肉", "リンパ", "骨格", "顔筋", "むくみ", "フェイスライン",
-                         "ほうれい線", "施術", "コリ", "たるみ"]
-    expert_words_core = ["咬筋", "舌の位置", "表情グセ", "咬筋優位", "表情筋", "姿勢"]
-    s_expert = min(95, 65
-                   + sum(3 for w in expert_words_base if w in combined)
-                   + sum(6 for w in expert_words_core if w in combined))
+    # ② Curiosity: 続きを見たくなるか
+    # 情報ギャップ・意外な切り口・シリーズ予告
+    curiosity_markers = ["実は", "正直に言うと", "本当は", "知らない方が多い", "よく誤解される",
+                         "意外と", "次回は", "フォローすると", "続きは"]
+    s_curiosity = min(100, 60 + sum(8 for w in curiosity_markers if w in combined))
 
-    # 3. 独自性: 逆説・正直告白があるか
-    unique_markers = ["正直に", "本当は", "実は", "と思っていませんか", "仕方ない", "無理", "変わりません"]
-    s_unique = min(92, 72 + sum(5 for w in unique_markers if w in combined))
+    # ③ Emotional Hook: 自分のことだと思うか
+    # ターゲットの具体的な悩みワード
+    emotion_words = ["むくみ", "たるみ", "左右差", "老け", "フェイスライン", "骨格", "表情",
+                     "自信", "写真", "小顔", "顔痩せ", "変わらない", "諦め"]
+    s_emotional = min(100, 60 + sum(6 for w in emotion_words if w in combined))
 
-    # 4. 保存されやすさ: CTA種別
-    s_save = 92 if "保存" in cta else (80 if "フォロー" in cta else 75)
+    # ④ Save Value: 保存したくなるか
+    # 保存CTA + 情報密度（リスト・チェックリスト型）
+    has_save_cta = "保存" in cta
+    has_list     = any(c in script for c in ["①", "②", "③", "1.", "2.", "3.", "・"])
+    s_save = 60
+    if has_save_cta: s_save += 30
+    if has_list:     s_save += 15
+    s_save = min(100, s_save)
 
-    # 5. 共感: フックに共感ワード
-    empathy_words = ["気になる", "悩み", "不安", "感じ", "気がする", "辛い", "多い"]
-    s_empathy = min(92, 72 + sum(5 for w in empathy_words if w in hook))
+    # ⑤ Follow Value: この人をフォローしたくなるか
+    # フォローCTA + シリーズ予告 + 「この人しか言わない」感
+    has_follow_cta  = any(w in combined for w in ["フォローすると", "フォローして", "フォローお願い"])
+    has_series_hint = any(w in combined for w in ["次回は", "続きは", "シリーズ", "毎週"])
+    unique_angle    = any(w in combined for w in ["正直に言います", "本当は", "実は", "正直", "あきらめない"])
+    s_follow = 60
+    if has_follow_cta:  s_follow += 20
+    if has_series_hint: s_follow += 12
+    if unique_angle:    s_follow += 12
+    s_follow = min(100, s_follow)
 
-    # 6. 信頼性: 正直表明・個人差・否定しない
-    trust_markers = ["正直", "個人差", "変わりません", "あきらめない", "言えます",
-                     "必ず言え", "一切しません"]
-    s_trust = min(95, 72 + sum(5 for w in trust_markers if w in combined))
+    # ⑥ Expert Thinking: 専門家の思考が見えるか
+    # 因果・「なぜなら」・専門用語の使い方・考え方の開示
+    thinking_markers = ["なぜなら", "だから", "理由は", "から来ています", "考え方",
+                        "私は", "私が", "施術していて", "見てきた", "感じるのは"]
+    expert_terms     = ["咬筋", "表情筋", "リンパ", "骨格", "表情グセ", "舌の位置", "顔筋", "姿勢"]
+    s_expert = min(100, 55
+                   + sum(8 for w in thinking_markers if w in combined)
+                   + sum(5 for w in expert_terms if w in combined))
 
-    # 7. ブランドらしさ: brand_score から直接算出
+    # ⑦ Brand: ブランドラインを守っているか
     s_brand = brand_score
 
-    # 8. 撮影しやすさ: カット数が少ないほど楽（6カット以下 = 高得点）
-    s_shoot = 92 if cuts <= 5 else (86 if cuts == 6 else 75)
-
-    # 9. 編集しやすさ: editing_notesが設定されているか
-    has_editing = bool(record.get("editing_notes", "").strip())
-    s_edit = 90 if has_editing else 70
-
-    # 10. CTA: 動詞が明確か（「保存して」「フォローすると」「プロフィールのリンクから」）
-    cta_verbs = ["保存して", "フォローすると", "プロフィールのリンク", "リンクから"]
-    s_cta = min(95, 72 + sum(6 for v in cta_verbs if v in cta))
-
     scores = {
-        "フック":       s_hook,
-        "専門性":       s_expert,
-        "独自性":       s_unique,
-        "保存されやすさ": s_save,
-        "共感":         s_empathy,
-        "信頼性":       s_trust,
-        "ブランドらしさ": s_brand,
-        "撮影しやすさ":  s_shoot,
-        "編集しやすさ":  s_edit,
-        "CTA":          s_cta,
+        "Audience Stop":   s_audience_stop,
+        "Curiosity":       s_curiosity,
+        "Emotional Hook":  s_emotional,
+        "Save Value":      s_save,
+        "Follow Value":    s_follow,
+        "Expert Thinking": s_expert,
+        "Brand":           s_brand,
     }
 
     avg = round(sum(scores.values()) / len(scores), 1)
 
-    # 改善点TOP3（スコアが低い順）
+    # 改善アドバイス（低スコア順TOP3）
     sorted_items = sorted(scores.items(), key=lambda x: x[1])
-    top3_improvements = []
     advice_map = {
-        "フック":       "冒頭3秒に疑問形（「〜って知ってますか？」）または強い共感語を入れてください",
-        "専門性":       "顔筋・リンパ・骨格など、CORE HARI固有の専門ワードをもう1〜2個追加してください",
-        "独自性":       "「正直に言うと…」「よく誤解されますが…」など、常識を更新する一文を入れてください",
-        "保存されやすさ": "CTAを「保存して、気になったときに読み返してください」に変更すると保存率が上がります",
-        "共感":         "フック（0〜3秒）にターゲットの悩みワード（たるみ・むくみ・左右差）を具体的に入れてください",
-        "信頼性":       "「個人差はあります」「正直に言います」など、誠実な補足を1〜2文追加してください",
-        "ブランドらしさ": "NGワード（痛い・怖い・劇的・激変）がないか再確認してください",
-        "撮影しやすさ":  "カット数を5〜6に絞ると撮影・編集の負担が下がります",
-        "編集しやすさ":  "編集指示（尺・字幕・BGM・色味・カット割り）を明記してください",
-        "CTA":          "CTAに動詞を明確に（「保存して」「フォローすると」「リンクから」）入れてください",
+        "Audience Stop":   "冒頭3秒に疑問形・数字・「実は」「正直に」など視聴者が止まる言葉を入れてください",
+        "Curiosity":       "「次回は〜」「フォローすると毎週〜」など、続きを期待させる一文を追加してください",
+        "Emotional Hook":  "フックにターゲットの具体的な悩みワード（たるみ・むくみ・左右差など）を入れてください",
+        "Save Value":      "CTAを「保存して、気になったときに読み返してください」に変更してください",
+        "Follow Value":    "「フォローすると毎週〜をお届けします」と明示してフォロー理由を伝えてください",
+        "Expert Thinking": "「なぜなら〜」「施術していて気づいたのですが〜」など専門家の思考プロセスを見せてください",
+        "Brand":           "NGワード（痛い・怖い・劇的・激変・必ず）がないか確認してください",
     }
-    for item, sc in sorted_items[:3]:
-        top3_improvements.append(f"{item}（{sc}点）: {advice_map.get(item, '内容を強化してください')}")
+    top3_improvements = [
+        f"{item}（{sc}点）: {advice_map[item]}"
+        for item, sc in sorted_items[:3]
+    ]
 
-    # 伸びない可能性
+    # リスク
     risks = []
-    if s_hook < 80:
-        risks.append("フックが弱く最初の3秒で離脱される可能性があります")
-    if s_unique < 80:
-        risks.append("類似投稿が多く埋もれる可能性があります（独自性の強化を）")
-    if s_save < 80:
-        risks.append("保存・フォローにつながりにくく拡散力が落ちる可能性があります")
+    if s_audience_stop < 80:
+        risks.append("Audience Stop不足 — 最初の3秒でスクロールされます（最優先で修正を）")
+    if s_curiosity < 80:
+        risks.append("Curiosity不足 — 途中離脱が増えます")
+    if s_follow < 80:
+        risks.append("Follow Value不足 — フォロワーに繋がりにくい")
     if not risks:
-        risks.append("大きなリスクは見当たりません。改善してさらに伸ばしましょう")
+        risks.append("大きなリスクは見当たりません")
 
     predicted_after = min(99, round(avg + 6))
 
@@ -1120,12 +1139,12 @@ def _generate_ceo_challenge(record: dict, review: dict) -> dict:
     strength = []
     if salon_check["found_unique"]:
         strength.append(f"固有視点あり: {salon_check['found_unique'][0]}")
-    if review["scores"].get("信頼性", 0) >= 88:
-        strength.append("「正直に言う」スタンスが一貫している")
-    if review["scores"].get("専門性", 0) >= 85:
-        strength.append("CORE HARI固有の専門知識が使われている")
-    if review["scores"].get("フック", 0) >= 85:
+    if review["scores"].get("Audience Stop", 0) >= 85:
         strength.append("最初の3秒で視聴者が止まれる")
+    if review["scores"].get("Expert Thinking", 0) >= 85:
+        strength.append("専門家の思考プロセスが見えている")
+    if review["scores"].get("Curiosity", 0) >= 85:
+        strength.append("続きを見たくなる構成になっている")
     if not strength:
         strength.append("ブランドラインを守りながら価値ある情報を届けられている")
 
@@ -1415,92 +1434,39 @@ def _check_quality_gates(record: dict, flow: dict) -> dict:
 
 def _compute_four_scores(record: dict, flow: dict) -> dict:
     """
-    Follower Score / Knowledge Score / Uniqueness Score / Series Score
-    各100点満点。80点未満は再生成対象。
+    7スコア評価の QAループ用ラッパー。
+    _compute_creator_review() の結果を再利用し、
+    Audience Stop を最優先ゲートとして failing に含める。
+
+    QAループの再生成基準:
+      - Audience Stop < 80 → 必ず再生成
+      - その他スコアの平均 < 78 → 再生成
     """
-    combined = " ".join([
-        record.get("hook", ""),
-        record.get("script_full", ""),
-        record.get("cta", ""),
-        record.get("caption", ""),
-    ])
+    review  = _compute_creator_review(record)
+    scores  = review["scores"]
 
-    unique_count    = flow["_unique_count"]
-    useful_count    = flow["_useful_count"]
-    curiosity_count = flow["_curiosity_count"]
-    has_series      = flow["_has_series"]
-    has_follow_cta  = flow["_has_follow_cta"]
-    has_next_ep     = flow.get("has_next_ep", False)
-    hook_from_viewer = flow.get("hook_from_viewer", False)
-    is_pov_ng       = flow.get("is_pov_ng", False)
-    perspective_count = sum(1 for m in _PERSPECTIVE_MARKERS if m in combined)
+    # Audience Stop が最優先ゲート。他スコアの平均も参照。
+    audience_stop = scores.get("Audience Stop", 0)
+    other_scores  = {k: v for k, v in scores.items() if k != "Audience Stop"}
+    other_avg     = sum(other_scores.values()) / len(other_scores) if other_scores else 0
 
-    # ── Follower Score (100pt): フォローしたくなる設計の強さ ─────────
-    fs = 0
-    fs += 25 if hook_from_viewer and not is_pov_ng else 0    # 視聴者悩みHook
-    fs += 25 if has_follow_cta else (10 if has_series else 0) # フォローCTA
-    fs += 25 if has_series and curiosity_count >= 2 else (15 if has_series or curiosity_count >= 2 else 0)
-    fs += 25 if unique_count >= 2 else (15 if unique_count == 1 else 0)  # 固有視点
-    follower_score = min(100, fs)
+    # failing: Audience Stop < 80 は単独でFAIL扱い
+    failing = {}
+    if audience_stop < 80:
+        failing["Audience Stop"] = audience_stop
+    if other_avg < 78:
+        # 平均を下げているスコアを個別にFAIL
+        for k, v in other_scores.items():
+            if v < 75:
+                failing[k] = v
 
-    # ── Knowledge Score (100pt): 考え方を伝えているか ────────────────
-    ks = 0
-    ks += 40 if perspective_count >= 3 else (25 if perspective_count == 2 else (10 if perspective_count == 1 else 0))
-    ks += 30 if any(m in combined for m in ["正直に言います", "本当は", "実は"]) else 0
-    ks += 30 if any(m in combined for m in ["だから", "なぜなら", "理由は", "から来ています"]) else 0
-    knowledge_score = min(100, ks)
-
-    # ── Uniqueness Score (100pt): CORE HARIだから言えること ──────────
-    if unique_count >= 3:
-        uniqueness_score = 100
-    elif unique_count == 2:
-        uniqueness_score = 75
-    elif unique_count == 1:
-        uniqueness_score = 50
-    else:
-        uniqueness_score = 0
-
-    # ── Series Score (100pt): シリーズとして見たくなるか ─────────────
-    ss = 0
-    ss += 40 if has_next_ep else 0
-    ss += 35 if has_follow_cta else (15 if has_series else 0)
-    ss += 25 if curiosity_count >= 2 else (10 if curiosity_count == 1 else 0)
-    series_score = min(100, ss)
-
-    def _advice_list(label, score, hints):
-        return hints if score < 80 else []
-
-    scores = {
-        "Follower Score":    follower_score,
-        "Knowledge Score":   knowledge_score,
-        "Uniqueness Score":  uniqueness_score,
-        "Series Score":      series_score,
-    }
-    failing = {k: v for k, v in scores.items() if v < 80}
-
-    advice = []
-    if follower_score < 80:
-        advice.append(
-            "【Follower Score】視聴者の悩みから始まるHook + フォローCTA + 固有視点2件以上を揃える"
-        )
-    if knowledge_score < 80:
-        advice.append(
-            "【Knowledge Score】「なぜ〜なのか」「だから〜になる」など因果・視点を3か所以上入れる"
-        )
-    if uniqueness_score < 80:
-        advice.append(
-            "【Uniqueness Score】咬筋優位・表情グセ・舌の位置など固有マーカーを2件以上入れる"
-        )
-    if series_score < 80:
-        advice.append(
-            "【Series Score】「次回は〜」または「フォローすると毎週〜」を入れてシリーズ化する"
-        )
+    advice = review["top3_improvements"]
 
     return {
-        "scores":       scores,
-        "failing":      failing,
-        "all_pass":     len(failing) == 0,
-        "advice":       advice,
+        "scores":   scores,
+        "failing":  failing,
+        "all_pass": len(failing) == 0,
+        "advice":   advice,
     }
 
 
@@ -1860,8 +1826,10 @@ def _recompute(record: dict) -> dict:
 
 def _quality_assurance_loop(record: dict) -> dict:
     """
-    4スコア（Follower / Knowledge / Uniqueness / Series）が全て80点以上になるまで
-    ルールベースで自動改善し、合格した投稿のみを返す。
+    7スコア QAループ。Audience Stop < 80 を最優先ゲートとして自動改善する。
+
+    評価順: Audience Stop > Curiosity > Emotional Hook > Save Value
+            > Follow Value > Expert Thinking > Brand
 
     改善ログを record["_qa_log"] に記録する（"_" プレフィックスで Sheets には書かない）。
     最大 _MAX_QA_ITER 回を超えたら最善状態で返す（合格できなくても出力する）。
