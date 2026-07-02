@@ -2419,26 +2419,48 @@ def _build_from_meeting_topic(today: str, meeting: dict) -> Optional[dict]:
     cta_map = {"保存": _CTA_SAVE, "フォロー": _CTA_FOLLOW, "問い合わせ": _CTA_DM}
     cta_str = cta_map.get(cta_type, _CTA_SAVE)
 
+    # ── Expert Interview: 専門家の会話から思考を引き出す ─────────────
+    # 投稿はテーマからではなく専門家との対話から生まれる
+    interview_insights = None
+    try:
+        from expert_interview import run_expert_interview
+        interview_insights = run_expert_interview(
+            theme=em_theme,
+            today=today,
+            vertical_name=getattr(_BRAND, "display_name", "専門家"),
+        )
+    except Exception as _ei_err:
+        print(f"  ⚠️ Expert Interview エラー（スキップ）: {_ei_err}")
+
     # ── Step1: Thought Library で最も近い専門家の思考を取得 ────────────
-    thoughts       = _find_thoughts(em_theme)
+    thoughts        = _find_thoughts(em_theme)
     primary_thought = thoughts[0] if thoughts else None
 
     # ── Step2: Persona Brief を生成（5ステップ）──────────────────────
     brief = _derive_persona_brief(em_theme, primary_thought)
 
     # ── Step3: 「この人に話しかける」スクリプトを組み立てる ────────────
-    speaker_words = (primary_thought or {}).get("speaker_words", "")
-    script_body   = _script_from_persona_brief(brief, cta_str, speaker_words)
-
-    # フック = 「最初に聞く質問」（Audience Stop の核）
-    actual_hook = brief["first_question"]
-
-    if primary_thought:
+    # インタビューの speaker_words を最優先で使う（専門家の実際の言葉）
+    if interview_insights and interview_insights.get("speaker_words"):
+        speaker_words = interview_insights["speaker_words"]
+        source = "expert_interview"
+        print(f"  Creator Studio: Priority0（Expert Interview → Persona-First: {em_theme[:30]}）")
+    elif primary_thought:
+        speaker_words = primary_thought.get("speaker_words", "")
         source = "thought_library"
         print(f"  Creator Studio: Priority0（Persona-First ← Thought Library: {primary_thought['topic']}）")
     else:
+        speaker_words = ""
         source = "editorial_meeting"
         print(f"  Creator Studio: Priority0（Persona-First ← テーマ直接: {em_theme[:30]}）")
+
+    script_body = _script_from_persona_brief(brief, cta_str, speaker_words)
+
+    # インタビューで引き出した「最初の質問」があればフックに採用する
+    if interview_insights and interview_insights.get("question"):
+        actual_hook = interview_insights["question"]
+    else:
+        actual_hook = brief["first_question"]
 
     # ── Step4: 撮影カット指示（Persona-First 構造）──────────────────
     shot_parts = [
@@ -2501,7 +2523,8 @@ def _build_from_meeting_topic(today: str, meeting: dict) -> Optional[dict]:
         "cut_count":     cut_count,
         "total_sec":     total_sec,
         # Persona Brief を record に格納（表示・デバッグ用）
-        "_persona_brief": brief,
+        "_persona_brief":      brief,
+        "_interview_insights": interview_insights,  # Expert Interview 結果（None の場合あり）
     }
 
     why = (
@@ -2658,6 +2681,26 @@ def print_creator_studio_summary(record: dict) -> None:
     # ── ② このテーマを選んだ理由 ─────────────────────────────────────
     sec("②", "このテーマを選んだ理由")
     body(record.get("why_today", ""))
+
+    # ── ② Expert Interview 結果 ─────────────────────────────────────
+    interview_insights = record.get("_interview_insights")
+    if interview_insights:
+        print(f"\n{THIN}")
+        print("  🎙️  EXPERT INTERVIEW — 専門家の思考（抽出済み）")
+        print(THIN)
+        for label, key in [
+            ("Observation（現場の気づき）", "observation"),
+            ("Question（クライアントへの質問）", "question"),
+            ("Perspective（独自の視点）", "perspective"),
+        ]:
+            val = interview_insights.get(key, "")
+            if val:
+                print(f"\n  【{label}】")
+                for line in val.splitlines():
+                    print(f"    {line}")
+        qa_count = len([p for p in interview_insights.get("raw_qa", []) if p.get("answer")])
+        print(f"\n  （{qa_count}問のインタビューから抽出）")
+        print()
 
     # ── ② Persona Brief（5ステップ思考）────────────────────────────
     brief = record.get("_persona_brief", {})

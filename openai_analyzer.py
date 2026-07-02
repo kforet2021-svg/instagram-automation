@@ -353,3 +353,142 @@ def generate_north_star_daily(entries: list, validated_patterns: list = None) ->
     result["参考記事一覧"] = "\n".join(reference_urls) if reference_urls else "(なし)"
 
     return result
+
+
+# ── Expert Interview ──────────────────────────────────────────────────────────
+# 専門家インタビューエンジン。投稿はテーマからではなく会話から生まれる。
+# 2コール/回: ① 質問生成、② Observation/Question/Perspective 抽出
+
+_INTERVIEW_Q_SYSTEM = (
+    "あなたはCreator Intelligence Platformのインタビュアーです。\n"
+    "専門家の「生きた思考」を引き出すことが目的です。\n"
+    "投稿ネタを探すのではなく、専門家が現場で本当に考えていることを聞き出してください。\n"
+    "回答は必ずJSON形式で。"
+)
+
+_INTERVIEW_EXTRACT_SYSTEM = (
+    "あなたはCreator Intelligence Platformの思考抽出エンジンです。\n"
+    "インタビュー記録から専門家の思考を3種類に分類・抽出します。\n"
+    "専門家の言葉をできるだけそのまま残してください。要約・解釈は最小限に。\n"
+    "回答は必ずJSON形式で。"
+)
+
+
+def generate_interview_questions(theme: str, vertical_name: str = "専門家") -> list:
+    """
+    今日のテーマに基づき、専門家から Observation/Question/Perspective を
+    引き出す10個の質問をAIが生成する。
+
+    質問の設計:
+      - Observation 系（3問）: 現場で気づいたこと・見ているもの
+      - Question 系（3問）: クライアントに最初に聞くこと
+      - Perspective 系（4問）: 独自の考え方・他との違い
+
+    戻り値: 10個の質問文字列のリスト（生成失敗時はデフォルト10問）
+    """
+    prompt = (
+        f"今日のテーマ: 「{theme}」\n"
+        f"インタビュー対象: {vertical_name}\n\n"
+        "このテーマについて、以下の3種類の思考を引き出す質問を合計10個作ってください。\n\n"
+        "【Observation 系 — 3問】現場で実際に気づいたこと・見ているもの\n"
+        "  例: 「最近の施術でいちばん印象に残った瞬間を教えてください」\n\n"
+        "【Question 系 — 3問】クライアントに最初に確認すること・よく聞く質問\n"
+        "  例: 「初めての方に必ず聞く質問は何ですか？」\n\n"
+        "【Perspective 系 — 4問】専門家独自の考え方・他との違い・信念\n"
+        "  例: 「一般的に言われていることで、あなたが違うと思うことは？」\n\n"
+        "質問の条件:\n"
+        "  - 答えやすい（具体的な経験を引き出す。「はい/いいえ」で終わらない）\n"
+        "  - 短い（30文字以内を目安）\n"
+        "  - 専門家が「確かにそう思う」と感じるもの\n\n"
+        'JSON形式で出力してください: {"questions": ["質問1", ..., "質問10"]}'
+    )
+    try:
+        raw = _call_openai(prompt, system_prompt=_INTERVIEW_Q_SYSTEM,
+                           label="expert interview: 質問生成")
+        import json as _json
+        data = _json.loads(raw)
+        qs = data.get("questions", [])
+        if isinstance(qs, list) and len(qs) >= 5:
+            return qs[:10]
+    except Exception as e:
+        print(f"  ⚠️ 質問生成に失敗しました（デフォルト10問を使用）: {e}")
+
+    # デフォルト10問（AI生成失敗時のフォールバック）
+    return [
+        f"「{theme}」について、最近いちばん印象に残ったクライアントの話を教えてください",
+        "その方はどんな悩みを持って来られましたか？",
+        "施術・相談を始めてまず最初に何を確認しますか？",
+        "同じ悩みでも原因が違うと感じることはありますか？具体的に教えてください",
+        "クライアントが気づいていない「見落としているポイント」でよくあるものは？",
+        "初めての方に必ず聞く質問は何ですか？なぜその質問をするのですか？",
+        "クライアントから意外な答えが返ってくる質問はありますか？",
+        f"「{theme}」について、一般的に言われていることであなたが違うと思うことは？",
+        "あなたの専門家としての考え方を一言で表すとしたら何ですか？",
+        "今日このテーマで、どうしても伝えたいことを一つだけ言うとしたら？",
+    ]
+
+
+def extract_interview_insights(qa_pairs: list) -> dict:
+    """
+    インタビューQ&Aから Observation/Question/Perspective を抽出する。
+
+    qa_pairs: [{"question": "...", "answer": "..."}, ...]
+
+    戻り値:
+        observation  : 専門家が現場で気づいたこと（原文に近い形で）
+        question     : 専門家がクライアントに問いかける質問
+        perspective  : 専門家独自の考え方・解釈
+        speaker_words: 投稿の台本に直接使えるセリフ（専門家の言葉から組み立て）
+        raw_qa       : 元のQ&Aリスト（保存用）
+    """
+    qa_text = "\n\n".join(
+        f"Q: {pair['question']}\nA: {pair['answer']}"
+        for pair in qa_pairs
+        if pair.get("answer", "").strip()
+    )
+
+    if not qa_text.strip():
+        return {
+            "observation": "", "question": "", "perspective": "",
+            "speaker_words": "", "raw_qa": qa_pairs,
+        }
+
+    prompt = (
+        "以下は専門家へのインタビュー記録です。\n\n"
+        f"{qa_text}\n\n"
+        "この会話から以下を抽出してください。\n\n"
+        "【抽出ルール】\n"
+        "  - 専門家の実際の言葉をできるだけそのまま使う\n"
+        "  - 要約・美化・解釈を加えない\n"
+        "  - 空白の場合は空文字にする（作らない）\n\n"
+        "Observation（専門家が現場で気づいたこと）:\n"
+        "  現場の観察・所見・パターン。「〜することが多い」「〜を見てきた」形式で。\n\n"
+        "Question（専門家がクライアントに問いかけること）:\n"
+        "  実際に使う質問文。「〜ですか？」形式で。\n\n"
+        "Perspective（専門家独自の考え方・解釈）:\n"
+        "  他の専門家とは違う独自の視点。「〜だと思っています」「〜から考えています」形式で。\n\n"
+        "speaker_words（投稿の台本候補）:\n"
+        "  上記3つを組み合わせた「この人が話しかける」セリフ。改行区切りで複数文。\n"
+        "  必ず「あなたに話しかける」形式にすること。\n\n"
+        "JSON形式で出力:\n"
+        '{"observation":"...","question":"...","perspective":"...","speaker_words":"..."}'
+    )
+
+    try:
+        raw = _call_openai(prompt, system_prompt=_INTERVIEW_EXTRACT_SYSTEM,
+                           label="expert interview: 思考抽出")
+        import json as _json
+        data = _json.loads(raw)
+        return {
+            "observation":   str(data.get("observation",   "")).strip(),
+            "question":      str(data.get("question",      "")).strip(),
+            "perspective":   str(data.get("perspective",   "")).strip(),
+            "speaker_words": str(data.get("speaker_words", "")).strip(),
+            "raw_qa":        qa_pairs,
+        }
+    except Exception as e:
+        print(f"  ⚠️ 思考抽出に失敗しました: {e}")
+        return {
+            "observation": "", "question": "", "perspective": "",
+            "speaker_words": "", "raw_qa": qa_pairs,
+        }
