@@ -2390,6 +2390,41 @@ def _script_from_persona_brief(brief: dict, cta_str: str, speaker_words: str = "
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Single Story Rule: Observation フィルタ
+# ────────────────────────────────────────────────────────────────────────────
+
+def _filter_observations_for_theme(observations: list, theme: str) -> list:
+    """
+    SINGLE STORY RULE: em_theme に関連するObservationだけを残す。
+
+    複数テーマが混在するObservationリストから、選択テーマに最も近い
+    上位3件だけを返す。関連度ゼロのものは除外する。
+
+    関連度判定: テーマのキーワード（2文字以上）がObservation本文に含まれるか。
+    全件関連度ゼロの場合は全件を返す（フォールバック）。
+    """
+    if not observations or not theme:
+        return observations
+
+    theme_keywords = [w for w in theme.replace("・", " ").split() if len(w) >= 2]
+    if not theme_keywords:
+        return observations[:3]
+
+    def _score(obs: dict) -> int:
+        content = obs.get("content", "") if isinstance(obs, dict) else str(obs)
+        return sum(1 for kw in theme_keywords if kw in content)
+
+    scored = sorted(observations, key=_score, reverse=True)
+    # 全件スコアゼロ → フォールバックで全件使用（Conversationは最優先）
+    if _score(scored[0]) == 0:
+        return observations[:3]
+
+    # スコア > 0 のものだけ残し、上位3件まで
+    relevant = [o for o in scored if _score(o) > 0]
+    return relevant[:3]
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Priority0: Editorial Meeting の Selected Topic から直接ブリーフ生成
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -2419,6 +2454,10 @@ def _build_from_meeting_topic(
     if not selected:
         return None
 
+    # ── SINGLE STORY RULE ───────────────────────────────────────────
+    # Editorial Meeting で選んだテーマが「この投稿の唯一のテーマ」。
+    # World Context / Conversation で出た他テーマは全て捨てる。
+    # 投稿の最初から最後まで、このテーマだけで話す。
     em_theme  = selected.get("theme", "").strip()
     cta_type  = selected.get("cta_type", "保存")
     if not em_theme:
@@ -2450,15 +2489,18 @@ def _build_from_meeting_topic(
     thoughts        = _find_thoughts(em_theme)
     primary_thought = thoughts[0] if thoughts else None
 
-    # ── Observation を Content Engine に渡す ─────────────────────────
-    # Conversationの内容は元テーマへ引き戻さない。
-    # Observationをそのまま使い、Thought Libraryで補完する。
-    conv_observations = conversation.get("observations", [])  # [{"type": ..., "content": ...}]
+    # ── Observation フィルタ（Single Story Rule）──────────────────────
+    # Conversation で複数テーマのObservationが来ても、em_theme に最も近い
+    # 上位3件だけを使う。他は捨てる。テーマを混ぜない。
+    all_observations = conversation.get("observations", [])  # [{"type": ..., "content": ...}]
+    conv_observations = _filter_observations_for_theme(all_observations, em_theme)
     lib_speaker_words = (primary_thought or {}).get("speaker_words", "")
 
+    discarded = len(all_observations) - len(conv_observations)
     if conv_observations:
         source = "creator_conversation"
-        print(f"  Creator Studio: Step6（Observation × {len(conv_observations)}件 → Content Engine）")
+        discard_note = f"（{discarded}件を他テーマとして除外）" if discarded else ""
+        print(f"  Creator Studio: Step6（Observation × {len(conv_observations)}件 → Content Engine）{discard_note}")
     elif primary_thought:
         source = "thought_library"
         print(f"  Creator Studio: Step6（Thought Library: {(primary_thought or {}).get('topic', '')}）")
@@ -2659,6 +2701,8 @@ def generate_creator_studio_daily() -> Optional[dict]:
     )
 
     # ── ⑤ Platform Strategy: Editorial Meeting でテーマ選定 ───────────
+    # SINGLE STORY RULE: ここで選んだ1テーマがこの投稿の全て。
+    # World Context / Conversation で出た他テーマは以降のフローで捨てる。
     print("\n  ⑤ Platform Strategy（Editorial Meeting）...")
     try:
         records_30d = sheets_writer.get_recent_creator_studio_records(days=7)
