@@ -55,7 +55,8 @@ def run_expert_interview(
     print(f"  テーマ: 「{theme}」")
     print(f"  日付:   {today}")
     print()
-    print("  AIが10個の質問を生成します。あなたの経験・言葉で答えてください。")
+    print("  Conversation Interview: 専門家の「会話」を集めます。")
+    print("  知識より口癖・感覚・現場の一言を聞かせてください。")
     print("  空Enterでスキップ（その質問は記録しません）")
     print("-" * 60)
 
