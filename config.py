@@ -31,6 +31,11 @@ load_dotenv()
 # 将来: ACTIVE_VERTICAL=yoga_studio python3 main.py で別Verticalに切り替え。
 ACTIVE_VERTICAL: str = os.getenv("ACTIVE_VERTICAL", "core_hari")
 
+# --- 地域設定 ---
+# World Context は全国ニュースより地域情報を優先する。
+# 環境変数 REGION で上書き可能: REGION="東京都" python3 main.py
+REGION: str = os.getenv("REGION", "北海道札幌市")
+
 # --- API認証情報 ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 BRIGHT_DATA_API_KEY = os.getenv("BRIGHT_DATA_API_KEY", "")

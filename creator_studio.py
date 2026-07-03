@@ -2652,7 +2652,127 @@ def _themes_match(em_theme: str, record_theme: str) -> bool:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# メイン公開関数
+# Phase 1: Topic Candidates まで生成してSTOP
+# ────────────────────────────────────────────────────────────────────────────
+
+def generate_phase1_daily() -> dict:
+    """
+    Creator Intelligence Phase 1 — 毎朝のテーマ提案。
+
+    フロー:
+      ① World Context（地域優先）
+      ② Observation収集（現場の気づき3問）
+      ③ Topic Intelligence: World Context × Observation → 5〜8テーマ候補
+      → STOP（ユーザーがテーマを選択）
+
+    投稿は生成しない。
+    「今日はこれ話したら面白そう」を提案するのが目的。
+
+    Returns:
+        {
+            "world_ctx": dict,
+            "observations": list,
+            "topic_candidates": list,
+            "selected_topic": dict | None,
+        }
+    """
+    import world_context as wc
+    import topic_intelligence as ti
+
+    today = datetime.date.today().isoformat()
+
+    # ── ① World Context: 地域優先トレンドを収集 ──────────────────────────
+    print()
+    print("=" * 60)
+    print("  Creator Intelligence — Phase 1")
+    print("  今日話したくなるテーマを探します")
+    print("=" * 60)
+    print("\n  ① World Context を取得中...")
+    world_ctx = wc.get_world_context(today)
+    wc.print_world_context(world_ctx)
+
+    # ── ② Observation: 現場の気づきを収集（AIコストゼロ）────────────────
+    print("\n  ② Observation — 最近の気づきを聞かせてください")
+    vertical_name = getattr(_BRAND, "display_name", "専門家")
+    observations = ti.collect_observations(
+        world_ctx=world_ctx,
+        vertical_name=vertical_name,
+    )
+
+    # ── ③ Topic Intelligence: Topic候補を生成 ────────────────────────────
+    print("\n  ③ Topic Intelligence — テーマを生成中...")
+    candidates = ti.generate_topic_candidates(
+        world_ctx=world_ctx,
+        observations=observations,
+        vertical_name=vertical_name,
+    )
+
+    ti.print_topic_candidates(candidates)
+
+    # ── ユーザー選択（対話環境のみ）─────────────────────────────────────
+    selected = ti.select_topic_interactive(candidates)
+
+    if selected:
+        print()
+        print("  ✅ Phase 1 完了。選択テーマ: 「" + selected["theme"] + "」")
+        print("  次: Conversation → Observation整理 → 投稿生成")
+    else:
+        print()
+        print("  ✅ Phase 1 完了。テーマ候補を生成しました。")
+        print("  テーマを選んだら Conversation を開始できます。")
+
+    print()
+
+    return {
+        "date":             today,
+        "world_ctx":        world_ctx,
+        "observations":     observations,
+        "topic_candidates": candidates,
+        "selected_topic":   selected,
+    }
+
+
+def print_phase1_summary(result: dict) -> None:
+    """Phase 1 の結果サマリーを表示する。"""
+    if not result:
+        return
+
+    W = 60
+    print()
+    print("=" * W)
+    print("  PHASE 1 SUMMARY")
+    print("=" * W)
+
+    world_ctx = result.get("world_ctx", {})
+    region = world_ctx.get("region", "")
+    season = world_ctx.get("season", "")
+    if region or season:
+        print(f"  地域: {region}  季節: {season}")
+
+    obs = result.get("observations", [])
+    if obs:
+        print(f"\n  【Observation × {len(obs)}件】")
+        for o in obs:
+            t = o.get("type", "気づき") if isinstance(o, dict) else "気づき"
+            c = o.get("content", o)    if isinstance(o, dict) else o
+            print(f"    [{t}] {c}")
+
+    candidates = result.get("topic_candidates", [])
+    if candidates:
+        print(f"\n  【Topic候補 × {len(candidates)}案】")
+        for i, c in enumerate(candidates, 1):
+            stars = "★" * c.get("stars", 3)
+            print(f"    [{i}] {stars} {c['theme']}")
+
+    selected = result.get("selected_topic")
+    if selected:
+        print(f"\n  【選択テーマ】「{selected['theme']}」")
+
+    print()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# メイン公開関数（旧Phase: 投稿生成フロー — Phase2以降で再有効化）
 # ────────────────────────────────────────────────────────────────────────────
 
 def generate_creator_studio_daily() -> Optional[dict]:

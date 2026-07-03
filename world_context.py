@@ -127,28 +127,37 @@ def get_season_context(today: str) -> dict:
 
 # ── World Context（AIが社会・生活・心理トレンドを合成）─────────────────────
 
-def get_world_context(today: str) -> dict:
+def get_world_context(today: str, region: str = "") -> dict:
     """
     World Context を取得する。
 
     Step1: 季節文脈をAIコストゼロで計算
     Step2: OpenAI で社会・生活・心理トレンドを合成（1回）
 
+    region: 地域名（省略時は config.REGION を使用）。全国より地域情報を優先。
+
     戻り値: 季節情報 + social_trends + life_trends + psychology_trends + hot_tension + audience_mood
     """
+    if not region:
+        try:
+            from config import REGION
+            region = REGION
+        except Exception:
+            region = ""
+
     season_ctx = get_season_context(today)
 
-    # AIによるトレンド合成
-    ai_trends = _fetch_ai_trends(today, season_ctx)
+    # AIによるトレンド合成（地域優先）
+    ai_trends = _fetch_ai_trends(today, season_ctx, region=region)
 
-    return {**season_ctx, **ai_trends}
+    return {**season_ctx, **ai_trends, "region": region}
 
 
-def _fetch_ai_trends(today: str, season_ctx: dict) -> dict:
+def _fetch_ai_trends(today: str, season_ctx: dict, region: str = "") -> dict:
     """OpenAI でソーシャル・生活・心理トレンドを合成する（1回）。"""
     try:
         from openai_analyzer import get_world_context_trends
-        return get_world_context_trends(today, season_ctx)
+        return get_world_context_trends(today, season_ctx, region=region)
     except Exception as e:
         print(f"  ⚠️ World Context AI取得失敗（フォールバック使用）: {e}")
         return _fallback_trends(season_ctx)

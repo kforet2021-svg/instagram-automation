@@ -516,11 +516,12 @@ _WORLD_CONTEXT_SYSTEM = (
 )
 
 
-def get_world_context_trends(today: str, season_context: dict) -> dict:
+def get_world_context_trends(today: str, season_context: dict, region: str = "") -> dict:
     """
     今日の社会・生活・心理トレンドをAIが合成する（1コール）。
 
     season_context: world_context.get_season_context() の出力
+    region: 地域名（例: "北海道札幌市"）。全国ニュースより地域情報を優先する。
 
     戻り値:
         social_trends    : 社会トレンド（ニュース・AI・経済・制度・イベントなど）
@@ -536,12 +537,15 @@ def get_world_context_trends(today: str, season_context: dict) -> dict:
     uv       = season_context.get("uv_level", "")
     pollen   = season_context.get("pollen_level", "")
 
+    region_line = f"地域: {region}（全国ニュースよりこの地域の状況を優先してください）\n" if region else ""
     prompt = (
         f"今日: {today}（{season}・{month}月）\n"
+        f"{region_line}"
         f"季節文脈: {month_ctx}\n"
         f"紫外線: {uv} / 花粉: {pollen}\n"
         f"イベント・連休: {holiday}\n\n"
-        "この日付・季節を踏まえて、以下を推測・合成してください。\n\n"
+        "この日付・季節・地域を踏まえて、以下を推測・合成してください。\n"
+        "※地域特有の気候・文化・生活スタイルがある場合は必ず反映する。\n\n"
         "【social_trends】社会で今起きていること（3〜5点、箇条書き）\n"
         "  ニュース・AI動向・経済・制度変更・スポーツ・映画・ドラマなど\n\n"
         "【life_trends】人々の生活がどう変わっているか（3〜5点、箇条書き）\n"
@@ -825,3 +829,96 @@ def extract_observations_only(qa_pairs: list) -> dict:
     except Exception as e:
         print(f"  ⚠️ Observation抽出失敗: {e}")
         return {"observations": [], "raw_qa": qa_pairs}
+
+
+# ── Topic Intelligence（Phase 1: Topic候補生成）────────────────────────────
+
+_TOPIC_CANDIDATES_SYSTEM = (
+    "あなたはCreator Intelligence PlatformのTopic Intelligence Engineです。\n"
+    "専門家が「今日はこれ話したら面白そう」と思えるテーマ候補を提案します。\n\n"
+    "【禁止】\n"
+    "  ✗ 投稿文・台本・キャプションを書く\n"
+    "  ✗ 「〜についての投稿を作りましょう」という提案\n"
+    "  ✗ 一般論・どの専門家でも言えること\n\n"
+    "【必須】\n"
+    "  ○ 「今日・今の季節・この地域だから面白い」テーマ\n"
+    "  ○ 専門家の現場観察から生まれたテーマ\n"
+    "  ○ 読者が「え、それ私のこと？」と思えるテーマ\n"
+    "回答は必ずJSON形式で。"
+)
+
+
+def generate_topic_candidates_ai(
+    world_ctx: dict,
+    observations: list,
+    vertical_name: str = "専門家",
+    region: str = "",
+) -> list:
+    """
+    World Context × Observation からTopic候補を生成する（1コール）。
+
+    戻り値: [{"theme": "...", "stars": 5, "why_now": "...", "who": "...", "why_expert": "..."}, ...]
+    失敗時は空リスト。
+    """
+    season    = world_ctx.get("season", "")
+    hot       = world_ctx.get("hot_tension", "")
+    social    = world_ctx.get("social_trends", "")
+    life      = world_ctx.get("life_trends", "")
+    psych     = world_ctx.get("psychology_trends", "")
+    month_ctx = world_ctx.get("month_context", "")
+
+    obs_text = ""
+    if observations:
+        obs_lines = [
+            f"  ・[{o.get('type','気づき')}] {o.get('content', o) if isinstance(o, dict) else o}"
+            for o in observations
+        ]
+        obs_text = "【専門家のObservation（現場から）】\n" + "\n".join(obs_lines) + "\n\n"
+
+    region_line = f"地域: {region}\n" if region else ""
+
+    prompt = (
+        f"専門家: {vertical_name}\n"
+        f"{region_line}"
+        f"今日の季節: {season}（{month_ctx}）\n"
+        f"今の最大関心事: {hot}\n"
+        f"社会トレンド: {social[:200] if social else '（なし）'}\n"
+        f"生活トレンド: {life[:200] if life else '（なし）'}\n"
+        f"人々の心理: {psych[:200] if psych else '（なし）'}\n\n"
+        f"{obs_text}"
+        "上記を踏まえて、この専門家が「今日話したくなる」テーマを5〜8案提案してください。\n\n"
+        "【評価基準】\n"
+        "  ★★★★★: 今日この地域でこの専門家にしか言えない\n"
+        "  ★★★★☆: タイムリーで専門家らしい\n"
+        "  ★★★☆☆: まあまあ面白い\n\n"
+        "各テーマに:\n"
+        "  theme     : テーマ（20文字以内。投稿タイトルではなく「話題の核」）\n"
+        "  stars     : 1〜5（整数）\n"
+        "  why_now   : なぜ今なのか（30文字以内）\n"
+        "  who       : 誰に刺さるか（20文字以内）\n"
+        "  why_expert: なぜ専門家らしいか（30文字以内）\n\n"
+        'JSON: {"candidates": [{"theme":"...","stars":5,"why_now":"...","who":"...","why_expert":"..."}, ...]}'
+    )
+
+    try:
+        raw = _call_openai(prompt, system_prompt=_TOPIC_CANDIDATES_SYSTEM,
+                           label="topic intelligence: Topic候補生成")
+        import json as _json
+        data = _json.loads(raw)
+        candidates = data.get("candidates", [])
+        cleaned = []
+        for item in candidates:
+            theme = str(item.get("theme", "")).strip()
+            if not theme:
+                continue
+            cleaned.append({
+                "theme":      theme,
+                "stars":      max(1, min(5, int(item.get("stars", 3)))),
+                "why_now":    str(item.get("why_now", "")).strip(),
+                "who":        str(item.get("who", "")).strip(),
+                "why_expert": str(item.get("why_expert", "")).strip(),
+            })
+        return sorted(cleaned, key=lambda x: x["stars"], reverse=True)
+    except Exception as e:
+        print(f"  ⚠️ Topic候補生成失敗: {e}")
+        return []

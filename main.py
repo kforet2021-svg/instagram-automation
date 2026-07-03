@@ -339,7 +339,10 @@ from north_star_index import compute_north_star_index
 from north_star_report import save_north_star_daily_markdown
 from learning_engine import run_learning_engine, transition_stale_units, get_validated_patterns
 from feedback_collector import run_feedback_collector
-from creator_studio import generate_creator_studio_daily, print_creator_studio_summary
+from creator_studio import (
+    generate_creator_studio_daily, print_creator_studio_summary,
+    generate_phase1_daily, print_phase1_summary,
+)
 from research_candidate_score import (
     score_posts,
     sort_by_score,
@@ -1077,14 +1080,13 @@ def main() -> None:
         print("===== 取得・プールログ =====")
         _print_stats(CATEGORY_ALL, result["stats"])
         # 2026-07-01: 投稿0件でもCreator Studioは実行する(昨日以前のデータを使う)
-        cs_record_early = {}
+        phase1_result = {}
         try:
-            cs_record_early = generate_creator_studio_daily() or {}
-            if cs_record_early:
-                print_creator_studio_summary(cs_record_early)
+            phase1_result = generate_phase1_daily() or {}
+            if phase1_result:
+                print_phase1_summary(phase1_result)
         except Exception as e:
-            print(f"Creator Studioの実行中にエラーが発生しました: {e}")
-        _ceo_review(cs_record=cs_record_early, pool_count=0, analyzed_count=0)
+            print(f"Phase 1の実行中にエラーが発生しました: {e}")
         return
 
     # 4. プール対象の投稿をスプレッドシートに保存(構造的に使えない投稿は保存しない)
@@ -1125,24 +1127,16 @@ def main() -> None:
     print("===== 取得・プールログ =====")
     _print_stats(CATEGORY_ALL, result["stats"])
 
-    # 2026-07-01: Creator Studio MVP — 常に最後に実行(データが0件の日も動く)
-    cs_record = {}
+    # Phase 1: Topic Candidates まで生成してSTOP（投稿生成はPhase 2以降）
     try:
-        cs_record = generate_creator_studio_daily() or {}
-        if cs_record:
-            print_creator_studio_summary(cs_record)
+        phase1_result = generate_phase1_daily() or {}
+        if phase1_result:
+            print_phase1_summary(phase1_result)
     except Exception as e:
-        print(f"Creator Studioの実行中にエラーが発生しました: {e}")
+        print(f"Phase 1の実行中にエラーが発生しました: {e}")
 
     print()
     print("すべての処理が完了しました")
-
-    # CEO REVIEW — 毎実行の最後にMission整合性を確認する
-    _ceo_review(
-        cs_record=cs_record,
-        pool_count=result["stats"].get("pool_count", 0),
-        analyzed_count=result["stats"].get("analyzed_count", 0),
-    )
 
 
 if __name__ == "__main__":
