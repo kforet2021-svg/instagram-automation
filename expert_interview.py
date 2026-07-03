@@ -13,7 +13,7 @@ expert_interview.py — DEPRECATED
 # 後方互換シム: 旧呼び出しを新モジュールに委譲
 from creator_conversation import (
     run_creator_conversation as _run_cc,
-    format_conversation_for_display as format_interview_for_display,  # noqa: F401
+    format_observations_for_display as format_interview_for_display,  # noqa: F401
 )
 
 

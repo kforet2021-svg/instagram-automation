@@ -735,3 +735,93 @@ def extract_conversation_insights(qa_pairs: list) -> dict:
             "observations": [], "口ぐせ": "", "思い込み": "",
             "expert_thinking": "", "speaker_words": "", "raw_qa": qa_pairs,
         }
+
+
+# ── Observation Only 抽出（投稿生成から完全分離）────────────────────────────
+
+_OBSERVATION_ONLY_SYSTEM = (
+    "あなたはCreator Intelligence PlatformのObservation収集エンジンです。\n"
+    "会話記録から「専門家の気づき」だけを抽出します。\n\n"
+    "抽出するのは以下の3種類のみです:\n"
+    "  ① 専門家が最近気付いたこと（Observation）\n"
+    "  ② 専門家が最近驚いたこと（Discovery）\n"
+    "  ③ 専門家だけが見ていること（ExpertView）\n\n"
+    "【禁止】\n"
+    "  ✗ 会話の内容を元テーマへ引き戻す\n"
+    "  ✗ 投稿台本・speaker_wordsを生成する\n"
+    "  ✗ 「口ぐせ」「思い込み」「expert_thinking」を抽出する\n"
+    "  ✗ 要約・解釈・美化を加える\n\n"
+    "専門家の言葉をできるだけそのまま使ってください。\n"
+    "回答は必ずJSON形式で。"
+)
+
+
+def extract_observations_only(qa_pairs: list) -> dict:
+    """
+    Creator Conversation の回答から Observation だけを抽出する（1コール）。
+
+    投稿台本・テーマへの引き戻しは一切行わない。
+    会話の内容をそのまま保存することが目的。
+
+    qa_pairs: [{"question": "...", "answer": "..."}, ...]
+
+    戻り値:
+        observations: [
+          {"type": "Observation|Discovery|ExpertView", "content": "専門家の言葉"},
+          ...
+        ]
+        raw_qa: 元のQ&A（保存用）
+    """
+    qa_text = "\n\n".join(
+        f"Q: {p['question']}\nA: {p['answer']}"
+        for p in qa_pairs
+        if p.get("answer", "").strip()
+    )
+
+    if not qa_text.strip():
+        return {"observations": [], "raw_qa": qa_pairs}
+
+    prompt = (
+        "以下は専門家との会話記録です。\n\n"
+        f"{qa_text}\n\n"
+        "この会話から「専門家の気づき」だけを抽出してください。\n\n"
+        "【抽出する3種類】\n"
+        "  Observation（最近気付いたこと）\n"
+        "    例: 「朝起きると顎が疲れている人が最近多い」\n\n"
+        "  Discovery（最近驚いたこと）\n"
+        "    例: 「横向き寝の人は目尻の縦ジワが左右非対称なことが多い」\n\n"
+        "  ExpertView（専門家だけが見ていること）\n"
+        "    例: 「私はまず顎の左右差を見る。たるみより先に噛み癖がわかる」\n\n"
+        "【重要なルール】\n"
+        "  - 会話で出てきた内容をそのまま使う。元テーマへ引き戻さない\n"
+        "  - 1件も抽出できない場合は空配列を返す\n"
+        "  - 最大5件まで\n"
+        "  - 専門家の言葉をできるだけそのまま使う\n\n"
+        '{"observations": [{"type": "Observation|Discovery|ExpertView", "content": "専門家の言葉"}, ...]}'
+    )
+
+    try:
+        raw = _call_openai(prompt, system_prompt=_OBSERVATION_ONLY_SYSTEM,
+                           label="creator conversation: Observation抽出")
+        import json as _json
+        data = _json.loads(raw)
+        obs = data.get("observations", [])
+        if not isinstance(obs, list):
+            obs = []
+        # typeの正規化
+        valid_types = {"Observation", "Discovery", "ExpertView"}
+        cleaned = []
+        for item in obs:
+            if not isinstance(item, dict):
+                continue
+            t = item.get("type", "Observation")
+            if t not in valid_types:
+                t = "Observation"
+            c = str(item.get("content", "")).strip()
+            if c:
+                cleaned.append({"type": t, "content": c})
+        return {"observations": cleaned[:5], "raw_qa": qa_pairs}
+
+    except Exception as e:
+        print(f"  ⚠️ Observation抽出失敗: {e}")
+        return {"observations": [], "raw_qa": qa_pairs}

@@ -4,22 +4,27 @@ creator_conversation.py
 Creator Conversation Engine
 専門家とAIが「雑談」する。インタビューではない。
 
-AIは質問しない。会話する。
-目的は「知識を集めること」ではなく「専門家の観察・感覚・口ぐせを引き出すこと」。
+Conversation終了後は投稿を生成しない。
+Observationだけを抽出して保存する。
 
-収集優先順位:
-  1位 Observation  — 専門家が繰り返し気づいていること（最も価値ある資産）
-  2位 口ぐせ       — 専門家が自然に使う言葉
-  3位 思い込み     — クライアントがよく持つ誤解
-  4位 Expert Thinking — 専門家がどう考えるか
+Observationとは:
+  ・専門家が最近気付いたこと
+  ・専門家が最近驚いたこと
+  ・専門家だけが見ていること
+
+Conversationで出てきた内容を元テーマへ戻さない。
+Conversationの内容が最優先。
+投稿生成はObservation完成後、別Engineで行う。
 
 禁止事項:
   ✗ 「○○とは？」「○○について教えてください」（教科書質問）
   ✗ 知識・理論を問う質問
   ✗ 「はい/いいえ」で答えられる質問
-  → 専門家がお客様に話しかけるように質問する
+  ✗ Conversationの内容を元テーマへ引き戻す
+  ✗ Conversationの出力からspeaker_wordsや投稿台本を生成する
 
 【2026-07-03(1回目): 新規作成。Expert Interview 廃止 → Creator Conversation。】
+【2026-07-03(2回目): Observation抽出のみに特化。投稿生成から完全分離。】
 """
 
 from __future__ import annotations
@@ -38,25 +43,22 @@ def run_creator_conversation(
     """
     Creator Conversation を実行する。
 
-    World Context（季節・社会状況）を踏まえた会話質問で
-    専門家の「今のObservation」を引き出す。
-
-    Args:
-        world_context:  world_context.get_world_context() の出力
-        today:          実行日（YYYY-MM-DD）
-        vertical_name:  専門家の肩書き（表示用）
-        skip_if_no_tty: 非対話環境では自動スキップしてNoneを返す
+    Conversation終了後はObservationのみを抽出して返す。
+    投稿は生成しない。
 
     Returns:
-        dict with keys: observations, 口ぐせ, 思い込み, expert_thinking,
-                        speaker_words, raw_qa
+        {
+          "observations": ["...", "..."],   # 専門家の気づき（最重要・複数）
+          "raw_qa": [...],                  # 元のQ&A（保存用）
+          "date": today,
+        }
         スキップ時は None
     """
     if skip_if_no_tty and not sys.stdin.isatty():
         print("  ℹ️  非対話環境のため Creator Conversation をスキップします")
         return None
 
-    from openai_analyzer import generate_conversation_questions, extract_conversation_insights
+    from openai_analyzer import generate_conversation_questions, extract_observations_only
 
     season    = world_context.get("season", "")
     hot_topic = world_context.get("hot_tension", "")
@@ -66,13 +68,15 @@ def run_creator_conversation(
     print("   💬  CREATOR CONVERSATION")
     print("=" * 60)
     print(f"  {vertical_name}と雑談します。")
-    print(f"  今の季節: {season}  / 注目: {hot_topic[:30] if hot_topic else '（なし）'}")
+    if season:
+        print(f"  今の季節: {season}" + (f"  / {hot_topic[:30]}" if hot_topic else ""))
     print()
-    print("  知識より「最近気づいたこと」「よく言う言葉」を教えてください。")
+    print("  最近気づいたこと・驚いたこと・あなただけが見ていること")
+    print("  を教えてください。")
     print("  空Enterでスキップ（その質問は記録しません）")
     print("-" * 60)
 
-    # Step 1: World Context を踏まえた会話質問を生成（1 OpenAI call）
+    # Step 1: 会話質問を生成（1 OpenAI call）
     print("  質問を準備中...")
     questions = generate_conversation_questions(world_context, vertical_name)
 
@@ -96,59 +100,54 @@ def run_creator_conversation(
     print(f"  {answered}問 回答を受け取りました。")
 
     if answered == 0:
-        print("  ⚠️  回答なし。Thought Libraryのみで生成します。")
+        print("  ⚠️  回答なし。Conversationをスキップします。")
         return None
 
-    # Step 3: Observation・思考を抽出（1 OpenAI call）
+    # Step 3: Observationだけを抽出（1 OpenAI call）
+    # 投稿台本・テーマへの引き戻しは行わない
     print("  Observationを抽出中...")
-    insights = extract_conversation_insights(qa_pairs)
+    result = extract_observations_only(qa_pairs)
 
-    # 結果サマリー
+    # 結果表示
     print()
     print("-" * 60)
-    print("  📋 収集した専門家の思考")
+    print("  📍 OBSERVATION（専門家の気づき）")
     print("-" * 60)
 
-    obs_list = insights.get("observations", [])
+    obs_list = result.get("observations", [])
     if obs_list:
-        print(f"  [Observation × {len(obs_list)}件]")
-        for obs in obs_list[:3]:
-            print(f"    ・{obs[:70]}")
+        for i, obs in enumerate(obs_list, 1):
+            obs_type = obs.get("type", "気づき")
+            content  = obs.get("content", "")
+            print(f"\n  [{i}] {obs_type}")
+            print(f"    {content}")
+    else:
+        print("  （Observationが抽出されませんでした）")
 
-    if insights.get("口ぐせ"):
-        print(f"  [口ぐせ] {insights['口ぐせ'][:60]}")
-
-    if insights.get("思い込み"):
-        print(f"  [思い込み] {insights['思い込み'][:60]}")
-
-    if insights.get("expert_thinking"):
-        print(f"  [専門家の思考] {insights['expert_thinking'][:60]}")
-
+    print()
+    print("  ✅ Observation収集完了。投稿生成は別Engineで行います。")
     print("=" * 60)
     print()
 
-    return insights
+    return {
+        "observations": obs_list,
+        "raw_qa":       qa_pairs,
+        "date":         today,
+    }
 
 
-def format_conversation_for_display(insights: dict) -> str:
+def format_observations_for_display(result: dict) -> str:
     """Creator Studio 出力用フォーマット。"""
-    lines = ["【CREATOR CONVERSATION — 専門家の思考】"]
+    obs_list = result.get("observations", [])
+    if not obs_list:
+        return "（Observation なし）"
 
-    obs_list = insights.get("observations", [])
-    if obs_list:
-        lines.append(f"  Observation（{len(obs_list)}件）:")
-        for obs in obs_list:
-            lines.append(f"    ・{obs}")
+    lines = [f"【CREATOR CONVERSATION — Observation × {len(obs_list)}件】"]
+    for obs in obs_list:
+        obs_type = obs.get("type", "気づき")
+        content  = obs.get("content", "")
+        lines.append(f"  [{obs_type}] {content}")
 
-    if insights.get("口ぐせ"):
-        lines.append(f"  口ぐせ    : {insights['口ぐせ']}")
-
-    if insights.get("思い込み"):
-        lines.append(f"  思い込み  : {insights['思い込み']}")
-
-    if insights.get("expert_thinking"):
-        lines.append(f"  専門家の思考: {insights['expert_thinking']}")
-
-    answered = len([p for p in insights.get("raw_qa", []) if p.get("answer")])
-    lines.append(f"  （{answered}問の会話から収集）")
+    qa_count = len([p for p in result.get("raw_qa", []) if p.get("answer")])
+    lines.append(f"  （{qa_count}問の会話から収集）")
     return "\n".join(lines)

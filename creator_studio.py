@@ -2450,55 +2450,64 @@ def _build_from_meeting_topic(
     thoughts        = _find_thoughts(em_theme)
     primary_thought = thoughts[0] if thoughts else None
 
-    # 思考の優先順位: Creator Conversation > Thought Library > テーマ直接
-    conv_speaker_words = conversation.get("speaker_words", "")
-    lib_speaker_words  = (primary_thought or {}).get("speaker_words", "")
+    # ── Observation を Content Engine に渡す ─────────────────────────
+    # Conversationの内容は元テーマへ引き戻さない。
+    # Observationをそのまま使い、Thought Libraryで補完する。
+    conv_observations = conversation.get("observations", [])  # [{"type": ..., "content": ...}]
+    lib_speaker_words = (primary_thought or {}).get("speaker_words", "")
 
-    if conv_speaker_words:
-        speaker_words = conv_speaker_words
+    if conv_observations:
         source = "creator_conversation"
-        print(f"  Creator Studio: Step6（Creator Conversation → {em_theme[:30]}）")
-    elif lib_speaker_words:
-        speaker_words = lib_speaker_words
+        print(f"  Creator Studio: Step6（Observation × {len(conv_observations)}件 → Content Engine）")
+    elif primary_thought:
         source = "thought_library"
         print(f"  Creator Studio: Step6（Thought Library: {(primary_thought or {}).get('topic', '')}）")
     else:
-        speaker_words = ""
         source = "editorial_meeting"
         print(f"  Creator Studio: Step6（テーマ直接: {em_theme[:30]}）")
 
     # ── Step6: Content Generation ───────────────────────────────────
-    # Persona Brief（5ステップ）を World Context × Conversation で補強する
+    # Persona Brief を World Context × Observation で構築する
     brief = _derive_persona_brief(em_theme, primary_thought)
 
-    # フック: Creator Conversation の「最初の質問」 > Persona Brief の質問
-    conv_question = conversation.get("口ぐせ", "") or ""
-    if conv_question and len(conv_question) <= 40:
-        actual_hook = conv_question
+    # フック: Observation の ExpertView を最優先で使う
+    expert_view_obs = next(
+        (o for o in conv_observations if o.get("type") == "ExpertView"),
+        None,
+    )
+    if expert_view_obs:
+        actual_hook = expert_view_obs["content"][:40]
     else:
         actual_hook = brief["first_question"]
 
-    # Expert Thinking スタイルの台本（「私はまず○○を見ます」形式）
-    expert_thinking = conversation.get("expert_thinking", "")
-    observations    = conversation.get("observations", [])
-    obs_text        = observations[0] if observations else ""
+    # Observation から最初の1件を本文に使う（テーマへ引き戻さない）
+    first_obs = next(
+        (o for o in conv_observations if o.get("type") in ("Observation", "Discovery")),
+        None,
+    )
+    first_obs_line = first_obs["content"] if first_obs else brief["why_thinks"]
 
-    # 台本: Conversation があればそれを優先、なければ Persona Brief から
-    if speaker_words:
-        # 専門家の実際の言葉に World Context を接続
-        season     = world_ctx.get("season", "")
-        reader_need = audience_psych.get("reader_desire", "")
-        timing_line = f"この{season}の時期、{reader_need}" if season and reader_need else ""
-        script_body = speaker_words
-        if timing_line and timing_line[:10] not in script_body:
-            script_body = timing_line + "\n" + script_body
+    # 台本: Observation があればそれを本文の核にする
+    # Thought Library の speaker_words は補完としてのみ使う
+    if conv_observations:
+        obs_lines = [o["content"] for o in conv_observations[:3]]
+        season    = world_ctx.get("season", "")
+        timing    = f"この{season}の時期、" if season else ""
+        script_body = (
+            f"{timing}{brief['their_problem']}\n\n"
+            + "\n".join(f"・{line}" for line in obs_lines)
+            + f"\n\n{cta_str}"
+        )
     else:
-        script_body = _script_from_persona_brief(brief, cta_str, speaker_words)
+        script_body = _script_from_persona_brief(brief, cta_str, lib_speaker_words)
 
-    # ── 撮影カット指示 ────────────────────────────────────────────────
-    # 専門家の思考スタイル: 「私はまず○○を見ます」「私は○○から確認します」
-    expert_sees_line = expert_thinking if expert_thinking else brief["expert_sees"]
-    first_obs_line   = obs_text if obs_text else brief["why_thinks"]
+    # ── 撮影カット指示（専門家の思考スタイル）────────────────────────
+    # 「私はまず○○を見ます」「私は○○から確認します」
+
+    expert_view_line = (
+        expert_view_obs["content"][:50] if expert_view_obs
+        else f"まず {brief['expert_sees'][:40]}"
+    )
 
     shot_parts = [
         f"【カット1 / 2秒】フック・静止\n"
@@ -2509,13 +2518,13 @@ def _build_from_meeting_topic(
         f"  セリフ:「{brief['their_problem']}」\n"
         f"  ← World Context × 読者心理。「今この時期に自分ごと」にする。",
 
-        f"【カット3 / 10秒】カメラ目線（専門家の観察）\n"
-        f"  セリフ:「私はまず {brief['expert_sees'][:40]}」\n"
-        f"  ← 専門家の思考を見せる。知識を教えるのではなく「何を見るか」を開示する。",
+        f"【カット3 / 10秒】カメラ目線（専門家の観察・ExpertView）\n"
+        f"  セリフ:「私は {expert_view_line}」\n"
+        f"  ← Creator ConversationのExpertViewをそのまま使う。テーマへ引き戻さない。",
 
-        f"【カット4 / 10秒】カメラ目線（観察から気づいたこと）\n"
+        f"【カット4 / 10秒】カメラ目線（気づき・Observation）\n"
         f"  セリフ:「{first_obs_line[:50]}」\n"
-        f"  ← Observation。「今日から試せる」ヒントにつなげる。",
+        f"  ← Conversationで出てきたObservationをそのまま。「今日から試せる」につなげる。",
 
         f"【カット5 / 5秒】笑顔・CTA\n"
         f"  セリフ:「{cta_str[:40]}」",
@@ -2529,7 +2538,7 @@ def _build_from_meeting_topic(
         "",
         brief["their_problem"],
         "",
-        f"私はまず {brief['expert_sees'][:50]}",
+        f"私は {expert_view_line}",
         "",
         first_obs_line,
         "",
@@ -2562,7 +2571,11 @@ def _build_from_meeting_topic(
         "_persona_brief":      brief,
         "_world_context":      world_ctx,
         "_audience_psychology": audience_psych,
-        "_conversation":       conversation,
+        "_conversation": {
+            "observations": conv_observations,
+            "raw_qa":       conversation.get("raw_qa", []),
+            "date":         conversation.get("date", ""),
+        },
         "_account_strategy":   {
             "goal":      account_goal,
             "principle": content_principle,
@@ -2822,16 +2835,9 @@ def print_creator_studio_summary(record: dict) -> None:
         if obs_list:
             print(f"\n  【Observation × {len(obs_list)}件】")
             for obs in obs_list:
-                print(f"    ・{obs}")
-        for label, key in [
-            ("口ぐせ", "口ぐせ"),
-            ("クライアントの思い込み", "思い込み"),
-            ("専門家の思考", "expert_thinking"),
-        ]:
-            val = conversation.get(key, "")
-            if val:
-                print(f"\n  【{label}】")
-                print(f"    {val}")
+                obs_type = obs.get("type", "気づき") if isinstance(obs, dict) else "気づき"
+                content  = obs.get("content", obs)  if isinstance(obs, dict) else obs
+                print(f"    [{obs_type}] {content}")
         qa_count = len([p for p in conversation.get("raw_qa", []) if p.get("answer")])
         if qa_count:
             print(f"\n  （{qa_count}問の会話から収集）")
