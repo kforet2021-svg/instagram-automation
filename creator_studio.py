@@ -2393,19 +2393,25 @@ def _script_from_persona_brief(brief: dict, cta_str: str, speaker_words: str = "
 # Priority0: Editorial Meeting の Selected Topic から直接ブリーフ生成
 # ────────────────────────────────────────────────────────────────────────────
 
-def _build_from_meeting_topic(today: str, meeting: dict) -> Optional[dict]:
+def _build_from_meeting_topic(
+    today: str,
+    meeting: dict,
+    world_ctx: Optional[dict] = None,
+    audience_psych: Optional[dict] = None,
+    conversation: Optional[dict] = None,
+) -> Optional[dict]:
     """
-    Editorial Meeting の selected（採用されたテーマ）を入口として
-    Persona-First フロー（5ステップ）で「この人に話しかける」投稿を組み立てる。
+    6ステップ生成フロー の Step4〜6（コンテンツ生成部分）。
+
+    World Context × Audience Psychology × Observation × Expert Thinking → 投稿
 
     テーマから直接投稿を作ることは禁止。
-    必ず「ターゲット人物 → 悩み → 最初の質問 → 専門家が見るもの → 理由」の順で組み立てる。
+    必ず「世界文脈 × 読者心理 × 専門家の観察」から組み立てる。
 
     フロー:
-      1. Editorial Meeting Selected Topic → テーマを確定
-      2. Thought Library 検索 → テーマに最も近い専門家の思考エントリを取得
-      3. Persona Brief 生成 → 5ステップブリーフを組み立てる
-      4. スクリプト生成 → 「この人に話しかける」形式の台本を作る
+      Step4: Account Strategy（目的定義。セルフケア教育優先。施術前提禁止）
+      Step5: Platform Strategy（Instagram DNA 適用）
+      Step6: Content Generation（World Context × Observation × Expert Thinking）
     """
     selected = meeting.get("selected")
     if not selected:
@@ -2419,66 +2425,86 @@ def _build_from_meeting_topic(today: str, meeting: dict) -> Optional[dict]:
     cta_map = {"保存": _CTA_SAVE, "フォロー": _CTA_FOLLOW, "問い合わせ": _CTA_DM}
     cta_str = cta_map.get(cta_type, _CTA_SAVE)
 
-    # ── Expert Interview: 専門家の会話から思考を引き出す ─────────────
-    # 投稿はテーマからではなく専門家との対話から生まれる
-    interview_insights = None
-    try:
-        from expert_interview import run_expert_interview
-        interview_insights = run_expert_interview(
-            theme=em_theme,
-            today=today,
-            vertical_name=getattr(_BRAND, "display_name", "専門家"),
-        )
-    except Exception as _ei_err:
-        print(f"  ⚠️ Expert Interview エラー（スキップ）: {_ei_err}")
+    world_ctx      = world_ctx      or {}
+    audience_psych = audience_psych or {}
+    conversation   = conversation   or {}
 
-    # ── Step1: Thought Library で最も近い専門家の思考を取得 ────────────
+    # ── Step4: Account Strategy ─────────────────────────────────────
+    # CORE HARI = セルフケア教育。施術前提の投稿は禁止。
+    # 「自分で気付ける」「今日から試せる」内容を優先する。
+    account_goal = "セルフケア教育"
+    content_principle = "「自分で気付ける」「今日から試せる」内容を優先。施術は選択肢の一つ。"
+
+    # ── Step5: Platform Strategy（Thought Library × Conversation）────
     thoughts        = _find_thoughts(em_theme)
     primary_thought = thoughts[0] if thoughts else None
 
-    # ── Step2: Persona Brief を生成（5ステップ）──────────────────────
-    brief = _derive_persona_brief(em_theme, primary_thought)
+    # 思考の優先順位: Creator Conversation > Thought Library > テーマ直接
+    conv_speaker_words = conversation.get("speaker_words", "")
+    lib_speaker_words  = (primary_thought or {}).get("speaker_words", "")
 
-    # ── Step3: 「この人に話しかける」スクリプトを組み立てる ────────────
-    # インタビューの speaker_words を最優先で使う（専門家の実際の言葉）
-    if interview_insights and interview_insights.get("speaker_words"):
-        speaker_words = interview_insights["speaker_words"]
-        source = "expert_interview"
-        print(f"  Creator Studio: Priority0（Expert Interview → Persona-First: {em_theme[:30]}）")
-    elif primary_thought:
-        speaker_words = primary_thought.get("speaker_words", "")
+    if conv_speaker_words:
+        speaker_words = conv_speaker_words
+        source = "creator_conversation"
+        print(f"  Creator Studio: Step6（Creator Conversation → {em_theme[:30]}）")
+    elif lib_speaker_words:
+        speaker_words = lib_speaker_words
         source = "thought_library"
-        print(f"  Creator Studio: Priority0（Persona-First ← Thought Library: {primary_thought['topic']}）")
+        print(f"  Creator Studio: Step6（Thought Library: {(primary_thought or {}).get('topic', '')}）")
     else:
         speaker_words = ""
         source = "editorial_meeting"
-        print(f"  Creator Studio: Priority0（Persona-First ← テーマ直接: {em_theme[:30]}）")
+        print(f"  Creator Studio: Step6（テーマ直接: {em_theme[:30]}）")
 
-    script_body = _script_from_persona_brief(brief, cta_str, speaker_words)
+    # ── Step6: Content Generation ───────────────────────────────────
+    # Persona Brief（5ステップ）を World Context × Conversation で補強する
+    brief = _derive_persona_brief(em_theme, primary_thought)
 
-    # インタビューで引き出した「最初の質問」があればフックに採用する
-    if interview_insights and interview_insights.get("question"):
-        actual_hook = interview_insights["question"]
+    # フック: Creator Conversation の「最初の質問」 > Persona Brief の質問
+    conv_question = conversation.get("口ぐせ", "") or ""
+    if conv_question and len(conv_question) <= 40:
+        actual_hook = conv_question
     else:
         actual_hook = brief["first_question"]
 
-    # ── Step4: 撮影カット指示（Persona-First 構造）──────────────────
+    # Expert Thinking スタイルの台本（「私はまず○○を見ます」形式）
+    expert_thinking = conversation.get("expert_thinking", "")
+    observations    = conversation.get("observations", [])
+    obs_text        = observations[0] if observations else ""
+
+    # 台本: Conversation があればそれを優先、なければ Persona Brief から
+    if speaker_words:
+        # 専門家の実際の言葉に World Context を接続
+        season     = world_ctx.get("season", "")
+        reader_need = audience_psych.get("reader_desire", "")
+        timing_line = f"この{season}の時期、{reader_need}" if season and reader_need else ""
+        script_body = speaker_words
+        if timing_line and timing_line[:10] not in script_body:
+            script_body = timing_line + "\n" + script_body
+    else:
+        script_body = _script_from_persona_brief(brief, cta_str, speaker_words)
+
+    # ── 撮影カット指示 ────────────────────────────────────────────────
+    # 専門家の思考スタイル: 「私はまず○○を見ます」「私は○○から確認します」
+    expert_sees_line = expert_thinking if expert_thinking else brief["expert_sees"]
+    first_obs_line   = obs_text if obs_text else brief["why_thinks"]
+
     shot_parts = [
         f"【カット1 / 2秒】フック・静止\n"
-        f"  ★ テロップ:「{brief['first_question'][:30]}」\n"
-        f"  ← Audience Stop。スクロールを止める最初の問いかけ",
+        f"  ★ テロップ:「{actual_hook[:30]}」\n"
+        f"  ← Audience Stop。スクロールを止める。",
 
-        f"【カット2 / 8秒】カメラ目線（共感）\n"
+        f"【カット2 / 8秒】カメラ目線（読者への問いかけ）\n"
         f"  セリフ:「{brief['their_problem']}」\n"
-        f"  ← ターゲットの悩みをそのまま代弁する",
+        f"  ← World Context × 読者心理。「今この時期に自分ごと」にする。",
 
-        f"【カット3 / 10秒】カメラ目線（診断）\n"
-        f"  セリフ:「{brief['expert_sees']}」\n"
-        f"  ← 専門家が見ているものを開示する",
+        f"【カット3 / 10秒】カメラ目線（専門家の観察）\n"
+        f"  セリフ:「私はまず {brief['expert_sees'][:40]}」\n"
+        f"  ← 専門家の思考を見せる。知識を教えるのではなく「何を見るか」を開示する。",
 
-        f"【カット4 / 10秒】カメラ目線（理由）\n"
-        f"  セリフ:「{brief['why_thinks']}」\n"
-        f"  ← なぜそう考えるかを因果で説明する",
+        f"【カット4 / 10秒】カメラ目線（観察から気づいたこと）\n"
+        f"  セリフ:「{first_obs_line[:50]}」\n"
+        f"  ← Observation。「今日から試せる」ヒントにつなげる。",
 
         f"【カット5 / 5秒】笑顔・CTA\n"
         f"  セリフ:「{cta_str[:40]}」",
@@ -2488,18 +2514,17 @@ def _build_from_meeting_topic(today: str, meeting: dict) -> Optional[dict]:
 
     # ── キャプション ──────────────────────────────────────────────────
     cap_parts = [
-        brief["first_question"],
+        actual_hook,
         "",
         brief["their_problem"],
         "",
-        brief["expert_sees"],
+        f"私はまず {brief['expert_sees'][:50]}",
         "",
-        brief["why_thinks"],
+        first_obs_line,
         "",
         cta_str,
         "",
     ]
-    # Vertical のタグを追加（brand_rules から取得できるなら）
     try:
         tags = _BRAND.cta_follow.split("#", 1)[-1] if "#" in _BRAND.cta_follow else ""
         if tags:
@@ -2513,7 +2538,7 @@ def _build_from_meeting_topic(today: str, meeting: dict) -> Optional[dict]:
         "mission":       {"保存": "保存を狙う", "フォロー": "フォロワーを増やす",
                           "問い合わせ": "問い合わせを増やす"}.get(cta_type, "保存を狙う"),
         "hook":          actual_hook,
-        "hook_text":     brief["first_question"][:35],
+        "hook_text":     actual_hook[:35],
         "script_full":   script_body,
         "shot_sequence": "\n\n".join(shot_parts),
         "editing_notes": _build_editing_notes(total_sec, cut_count),
@@ -2522,15 +2547,22 @@ def _build_from_meeting_topic(today: str, meeting: dict) -> Optional[dict]:
         "threads_text":  f"{actual_hook}\n\n{script_body[:120]}",
         "cut_count":     cut_count,
         "total_sec":     total_sec,
-        # Persona Brief を record に格納（表示・デバッグ用）
+        # 6ステップコンテキストを格納（表示・デバッグ用）
         "_persona_brief":      brief,
-        "_interview_insights": interview_insights,  # Expert Interview 結果（None の場合あり）
+        "_world_context":      world_ctx,
+        "_audience_psychology": audience_psych,
+        "_conversation":       conversation,
+        "_account_strategy":   {
+            "goal":      account_goal,
+            "principle": content_principle,
+        },
     }
 
     why = (
-        f"Editorial Meetingで「{em_theme}」が採用されました。\n"
-        f"採用理由: {meeting.get('selection_reason', '')}\n"
-        f"Persona-First: {brief['target_person']}"
+        f"World Context: {world_ctx.get('season', '')} / {world_ctx.get('hot_tension', '')[:30]}\n"
+        f"Audience: {audience_psych.get('reader_anxiety', '')[:40]}\n"
+        f"Editorial Meeting: {meeting.get('selection_reason', '')[:40]}\n"
+        f"Source: {source}"
     )
     return _assemble(today, source, "", tmpl, why)
 
@@ -2557,19 +2589,43 @@ def _themes_match(em_theme: str, record_theme: str) -> bool:
 
 def generate_creator_studio_daily() -> Optional[dict]:
     """
-    Editorial Meeting → Selected Topic を唯一のテーマ源として「今日撮る1本」を出力。
+    Creator Intelligence 6ステップ生成フロー。
 
-    フロー:
-      1. Editorial Meeting: 今日の社会トレンド × CORE HARI接点 → テーマ候補5案 → 採用1案
-      2. Priority0: 採用テーマから直接ブリーフ生成（テーマ変更禁止）
-      3. テーマ一致チェック: Selected Topic ≠ record["theme"] なら再生成（1回まで）
-      4. QA Loop: 4スコアが全て80点以上になるまで自動改善（最大3回）
+    ① World Context     — 社会・生活・心理トレンドを収集
+    ② Audience Psychology — 今日の読者心理を導出
+    ③ Creator Conversation — 専門家と雑談してObservationを収集
+    ④ Account Strategy  — アカウント目的を定義（セルフケア教育優先）
+    ⑤ Platform Strategy — Editorial Meeting でテーマを選定
+    ⑥ Content Generation — World Context × Observation × Expert Thinking → 投稿
+
+    投稿はテーマから作らない。
+    「今この世界で、この読者に、この専門家が伝えるべきこと」から作る。
     """
     import editorial_meeting as em
+    import world_context as wc
+    import creator_conversation as cc
 
     today = datetime.date.today().isoformat()
 
-    # ── Editorial Meeting: テーマ選定前の「今日の会議」───────────────
+    # ── ① World Context: 社会・生活・心理トレンドを収集 ──────────────
+    print("\n  ① World Context を取得中...")
+    world_ctx = wc.get_world_context(today)
+
+    # ── ② Audience Psychology: 読者心理を導出（AIコストゼロ）──────────
+    audience_psych = wc.derive_audience_psychology(
+        world_ctx,
+        vertical_name=getattr(_BRAND, "display_name", "専門家"),
+    )
+
+    # ── ③ Creator Conversation: 専門家と雑談（Observation収集）─────────
+    conversation = cc.run_creator_conversation(
+        world_context=world_ctx,
+        today=today,
+        vertical_name=getattr(_BRAND, "display_name", "専門家"),
+    )
+
+    # ── ⑤ Platform Strategy: Editorial Meeting でテーマ選定 ───────────
+    print("\n  ⑤ Platform Strategy（Editorial Meeting）...")
     try:
         records_30d = sheets_writer.get_recent_creator_studio_records(days=7)
         past_themes = [r.get("theme", "") for r in records_30d if r.get("date") != today]
@@ -2579,12 +2635,17 @@ def generate_creator_studio_daily() -> Optional[dict]:
     meeting = em.run_editorial_meeting(today, past_themes)
     em_theme = (meeting.get("selected") or {}).get("theme", "")
 
-    # ── Priority0: Editorial Meeting の Selected Topic から生成 ──────
-    record = _build_from_meeting_topic(today, meeting)
+    # ── ⑥ Content Generation ────────────────────────────────────────
+    print("\n  ⑥ Content Generation...")
+    record = _build_from_meeting_topic(
+        today, meeting,
+        world_ctx=world_ctx,
+        audience_psych=audience_psych,
+        conversation=conversation,
+    )
 
-    # Editorial Meeting に失敗した場合のみ P1〜P4 フォールバック
     if record is None:
-        print("  Creator Studio: Priority0失敗 → Priority1〜4 フォールバック")
+        print("  ⑥ 生成失敗 → Priority1〜4 フォールバック")
         record = (
             _try_priority1(today)
             or _try_priority2(today)
@@ -2592,30 +2653,31 @@ def generate_creator_studio_daily() -> Optional[dict]:
             or _priority4(today)
         )
 
-    # ── テーマ一致チェック ─────────────────────────────────────────
+    # テーマ一致チェック
     record_theme = record.get("theme", "")
     if em_theme and not _themes_match(em_theme, record_theme):
-        print(
-            f"  ⚠️ テーマ不一致を検出: EM=「{em_theme}」 / Record=「{record_theme}」\n"
-            f"  → Editorial Meeting テーマで再生成します"
+        print(f"  ⚠️ テーマ不一致（EM:「{em_theme}」/ 生成:「{record_theme}」）→ 再生成")
+        rebuilt = _build_from_meeting_topic(
+            today, meeting,
+            world_ctx=world_ctx,
+            audience_psych=audience_psych,
+            conversation=conversation,
         )
-        rebuilt = _build_from_meeting_topic(today, meeting)
         if rebuilt:
             record = rebuilt
         else:
-            # 強制的に theme フィールドを上書き（最終手段）
-            record["theme"]      = em_theme
+            record["theme"]       = em_theme
             record["video_title"] = em_theme
 
-    # ── QA Loop: 4スコアが全て80点以上になるまで自動改善 ────────────
+    # ── QA Loop: Audience Stop Check（80点未満は再生成）────────────────
     record = _quality_assurance_loop(record)
 
-    # Editorial Meeting の結果を record に埋め込む（sheets_writer には書かれない）
+    # メタ情報を record に格納
     record["_editorial_meeting"] = meeting
 
     try:
         sheets_writer.save_creator_studio_daily(record)
-        print(f"  ✓ creator_studio_daily に保存（source: {record.get('source_type')}）")
+        print(f"  ✓ creator_studio_daily 保存（source: {record.get('source_type')}）")
     except Exception as e:
         print(f"  ⚠️ creator_studio_daily 保存失敗: {e}")
 
@@ -2663,8 +2725,75 @@ def print_creator_studio_summary(record: dict) -> None:
     kpi_icons = {"フォロワー": "👥", "保存": "🔖", "問い合わせ": "📩", "信頼": "🤝"}
     kpi_icon  = kpi_icons.get(kpi_key, "")
 
-    # Editorial Meeting がある場合は CREATOR STUDIO 見出しを省略（既出のため）
-    if not record.get("_editorial_meeting"):
+    # ── 6ステップフロー表示 ──────────────────────────────────────────
+    # ① World Context
+    world_ctx = record.get("_world_context", {})
+    if world_ctx:
+        import world_context as _wc
+        _wc.print_world_context(world_ctx)
+
+    # ② Audience Psychology
+    audience_psych = record.get("_audience_psychology", {})
+    if audience_psych:
+        print(f"\n{'=' * W}")
+        print("  ② AUDIENCE PSYCHOLOGY")
+        print(f"{'=' * W}")
+        for label, key in [
+            ("今の読者心理", "reader_mindset"),
+            ("読者の不安・悩み", "reader_anxiety"),
+            ("読者が求めるもの", "reader_desire"),
+            ("投稿の方向性", "content_direction"),
+        ]:
+            val = audience_psych.get(key, "")
+            if val:
+                print(f"\n  【{label}】")
+                for line in val.splitlines():
+                    print(f"    {line}")
+        print()
+
+    # ③ Creator Conversation
+    conversation = record.get("_conversation", {})
+    if conversation:
+        print(f"\n{'=' * W}")
+        print("  ③ CREATOR CONVERSATION — 専門家の観察")
+        print(f"{'=' * W}")
+        obs_list = conversation.get("observations", [])
+        if obs_list:
+            print(f"\n  【Observation × {len(obs_list)}件】")
+            for obs in obs_list:
+                print(f"    ・{obs}")
+        for label, key in [
+            ("口ぐせ", "口ぐせ"),
+            ("クライアントの思い込み", "思い込み"),
+            ("専門家の思考", "expert_thinking"),
+        ]:
+            val = conversation.get(key, "")
+            if val:
+                print(f"\n  【{label}】")
+                print(f"    {val}")
+        qa_count = len([p for p in conversation.get("raw_qa", []) if p.get("answer")])
+        if qa_count:
+            print(f"\n  （{qa_count}問の会話から収集）")
+        print()
+
+    # ④ Account Strategy
+    account_strategy = record.get("_account_strategy", {})
+    if account_strategy:
+        print(f"\n{'=' * W}")
+        print("  ④ ACCOUNT STRATEGY")
+        print(f"{'=' * W}")
+        print(f"\n  【目的】{account_strategy.get('goal', '')}")
+        print(f"  【方針】{account_strategy.get('principle', '')}")
+        print()
+
+    # ⑤ Platform Strategy（Editorial Meeting）
+    meeting = record.get("_editorial_meeting")
+    if meeting:
+        import editorial_meeting as em
+        em.print_editorial_meeting(meeting)
+
+    # ⑥ Content Generation へ
+    if not record.get("_editorial_meeting") and not world_ctx:
         print(f"\n{THICK}")
         print(f"  CREATOR STUDIO")
         print(THICK)
@@ -2682,11 +2811,11 @@ def print_creator_studio_summary(record: dict) -> None:
     sec("②", "このテーマを選んだ理由")
     body(record.get("why_today", ""))
 
-    # ── ② Expert Interview 結果 ─────────────────────────────────────
-    interview_insights = record.get("_interview_insights")
+    # ── ② Creator Conversation 結果（旧 Expert Interview）─────────────
+    interview_insights = record.get("_interview_insights")  # 旧フィールド互換
     if interview_insights:
         print(f"\n{THIN}")
-        print("  🎙️  EXPERT INTERVIEW — 専門家の思考（抽出済み）")
+        print("  💬 CREATOR CONVERSATION — 専門家の思考")
         print(THIN)
         for label, key in [
             ("Observation（現場の気づき）", "observation"),

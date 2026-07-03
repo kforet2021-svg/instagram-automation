@@ -360,8 +360,8 @@ def generate_north_star_daily(entries: list, validated_patterns: list = None) ->
 # 2コール/回: ① 質問生成、② Observation/Question/Perspective 抽出
 
 _INTERVIEW_Q_SYSTEM = (
-    "あなたはCreator Intelligence PlatformのConversation Interviewerです。\n"
-    "目的は「知識の収集」ではなく「専門家の会話を集めること」です。\n\n"
+    "あなたはCreator Intelligence PlatformのCreator Conversationパートナーです。\n"
+    "目的は「知識の収集」ではなく「専門家の観察・口ぐせ・感覚を引き出すこと」です。\n\n"
     "【禁止】\n"
     "  - 「〜ですか？」形式の確認・知識質問\n"
     "  - 「どう思いますか？」「何が重要ですか？」などの抽象的な問い\n"
@@ -502,4 +502,236 @@ def extract_interview_insights(qa_pairs: list) -> dict:
         return {
             "observation": "", "question": "", "perspective": "",
             "speaker_words": "", "raw_qa": qa_pairs,
+        }
+
+
+# ── World Context Engine ──────────────────────────────────────────────────────
+# 社会・生活・心理トレンドを合成する（1コール/日）
+
+_WORLD_CONTEXT_SYSTEM = (
+    "あなたはCreator Intelligence PlatformのWorld Context Engineです。\n"
+    "SNSトレンドだけでなく、社会・生活・人々の心理を総合的に把握します。\n"
+    "専門家が「今このタイミングで何を発信すべきか」の土台を作ります。\n"
+    "回答は必ずJSON形式で。"
+)
+
+
+def get_world_context_trends(today: str, season_context: dict) -> dict:
+    """
+    今日の社会・生活・心理トレンドをAIが合成する（1コール）。
+
+    season_context: world_context.get_season_context() の出力
+
+    戻り値:
+        social_trends    : 社会トレンド（ニュース・AI・経済・制度・イベントなど）
+        life_trends      : 生活トレンド（消費・検索・SNS・旅行・口コミなど）
+        psychology_trends: 心理トレンド（今人々が感じていること）
+        hot_tension      : 今この瞬間の最大関心事・緊張感（1文）
+        audience_mood    : ターゲット層（30〜40代女性）の今の気分
+    """
+    season   = season_context.get("season", "")
+    month    = season_context.get("month", "")
+    month_ctx = season_context.get("month_context", "")
+    holiday  = season_context.get("holiday_context", "")
+    uv       = season_context.get("uv_level", "")
+    pollen   = season_context.get("pollen_level", "")
+
+    prompt = (
+        f"今日: {today}（{season}・{month}月）\n"
+        f"季節文脈: {month_ctx}\n"
+        f"紫外線: {uv} / 花粉: {pollen}\n"
+        f"イベント・連休: {holiday}\n\n"
+        "この日付・季節を踏まえて、以下を推測・合成してください。\n\n"
+        "【social_trends】社会で今起きていること（3〜5点、箇条書き）\n"
+        "  ニュース・AI動向・経済・制度変更・スポーツ・映画・ドラマなど\n\n"
+        "【life_trends】人々の生活がどう変わっているか（3〜5点、箇条書き）\n"
+        "  消費動向・検索トレンド・SNS・旅行・Amazon/楽天・口コミ傾向など\n\n"
+        "【psychology_trends】今人々が感じていること（3〜5点、箇条書き）\n"
+        "  不安・期待・疲れ・欲求・関心の変化など\n\n"
+        "【hot_tension】今この瞬間の最大関心事・緊張感（1文、30文字以内）\n\n"
+        "【audience_mood】30〜40代女性の今の気分・心理（1〜2文）\n"
+        "  ※美容・健康・セルフケアに関心がある層を想定\n\n"
+        'JSON: {"social_trends":"...","life_trends":"...","psychology_trends":"...","hot_tension":"...","audience_mood":"..."}'
+    )
+
+    try:
+        raw = _call_openai(prompt, system_prompt=_WORLD_CONTEXT_SYSTEM,
+                           label="world context: トレンド合成")
+        import json as _json
+        data = _json.loads(raw)
+        return {
+            "social_trends":     str(data.get("social_trends",     "")).strip(),
+            "life_trends":       str(data.get("life_trends",       "")).strip(),
+            "psychology_trends": str(data.get("psychology_trends", "")).strip(),
+            "hot_tension":       str(data.get("hot_tension",       "")).strip(),
+            "audience_mood":     str(data.get("audience_mood",     "")).strip(),
+        }
+    except Exception as e:
+        print(f"  ⚠️ World Context AI取得失敗: {e}")
+        return {
+            "social_trends": "", "life_trends": "",
+            "psychology_trends": "", "hot_tension": "", "audience_mood": "",
+        }
+
+
+# ── Creator Conversation（旧 Expert Interview）─────────────────────────────
+# 専門家との「雑談」からObservation・口ぐせ・思い込みを収集する
+
+_CONVERSATION_Q_SYSTEM = (
+    "あなたはCreator Intelligence PlatformのCreator Conversationパートナーです。\n"
+    "専門家と「雑談」してください。インタビューではありません。\n\n"
+    "目的: Observation（繰り返し気づいていること）を引き出す\n\n"
+    "【厳禁】\n"
+    "  ✗ 「〜とは何ですか？」「〜について教えてください」（教科書質問）\n"
+    "  ✗ 知識・理論を問う質問\n"
+    "  ✗ 「はい/いいえ」で答えられる質問\n\n"
+    "【良い質問の姿勢】\n"
+    "  ○ 専門家がお客様に話しかけるように\n"
+    "  ○ 「最近どうですか？」という感覚で\n"
+    "  ○ 答えると自然に口ぐせ・感覚・観察が出てくる問い\n\n"
+    "回答は必ずJSON形式で。"
+)
+
+_CONVERSATION_EXTRACT_SYSTEM = (
+    "あなたはCreator Intelligence PlatformのObservation収集エンジンです。\n"
+    "会話記録から専門家の「観察・口ぐせ・思い込み・思考」を抽出します。\n\n"
+    "収集優先順位:\n"
+    "  1位: Observation（繰り返し気づいていること）\n"
+    "  2位: 口ぐせ（専門家が自然に使う言葉）\n"
+    "  3位: 思い込み（クライアントの誤解・勘違い）\n"
+    "  4位: Expert Thinking（専門家がどう考えるか）\n\n"
+    "専門家の言葉をできるだけそのまま残す。要約・解釈を加えない。\n"
+    "回答は必ずJSON形式で。"
+)
+
+
+def generate_conversation_questions(world_context: dict, vertical_name: str = "専門家") -> list:
+    """
+    Creator Conversation の質問を生成する（1コール）。
+
+    World Context（季節・社会状況）を踏まえた「今ならではの質問」を生成。
+    教科書質問は禁止。専門家がお客様に話しかけるような質問にする。
+
+    戻り値: 10問以内の質問リスト（失敗時はデフォルト10問）
+    """
+    season    = world_context.get("season", "")
+    hot       = world_context.get("hot_tension", "")
+    month_ctx = world_context.get("month_context", "")
+    psych     = world_context.get("psychology_trends", "")
+
+    prompt = (
+        f"今の季節・状況: {season}（{month_ctx}）\n"
+        f"社会の関心: {hot}\n"
+        f"人々の心理: {psych[:100] if psych else '（情報なし）'}\n"
+        f"対象専門家: {vertical_name}\n\n"
+        "この専門家と「雑談」するための質問を10問作ってください。\n\n"
+        "【禁止】\n"
+        "  ✗ 「〜とは何ですか？」「〜について教えてください」\n"
+        "  ✗ 知識・理論を問う質問\n"
+        "  ✗ はい/いいえで終わる質問\n\n"
+        "【良い質問の例】（これをベースに今の季節・社会状況を反映する）\n"
+        "  ○ 最近一番多い相談は？\n"
+        "  ○ 最近気になっていることは？\n"
+        "  ○ 最近驚いたことは？\n"
+        "  ○ 施術やレッスンで最初に何を見ますか？\n"
+        "  ○ 最近よく言う言葉は？\n"
+        "  ○ お客様が一番勘違いしていることは？\n"
+        "  ○ 帰る時によく言われる言葉は？\n"
+        "  ○ 今年になって増えた悩みは？\n"
+        "  ○ 季節で増える相談は？\n"
+        "  ○ ニュースを見て最近思ったことは？\n\n"
+        "質問は短く（20文字以内）。専門家が「あ、それある」と思えるもの。\n\n"
+        'JSON: {"questions": ["質問1", ..., "質問10"]}'
+    )
+
+    try:
+        raw = _call_openai(prompt, system_prompt=_CONVERSATION_Q_SYSTEM,
+                           label="creator conversation: 質問生成")
+        import json as _json
+        data = _json.loads(raw)
+        qs = data.get("questions", [])
+        if isinstance(qs, list) and len(qs) >= 5:
+            return qs[:10]
+    except Exception as e:
+        print(f"  ⚠️ 質問生成失敗（デフォルト使用）: {e}")
+
+    # デフォルト10問（ユーザー指定の質問例をそのまま使う）
+    return [
+        "最近一番多い相談は？",
+        "最近気になっていることは？",
+        "最近驚いたことは？",
+        "施術やレッスンで最初に何を見ますか？",
+        "最近よく言う言葉は？",
+        "お客様が一番勘違いしていることは？",
+        "帰る時によく言われる言葉は？",
+        f"今年になって増えた悩みは？",
+        "季節で増える相談は？",
+        "ニュースを見て最近思ったことは？",
+    ]
+
+
+def extract_conversation_insights(qa_pairs: list) -> dict:
+    """
+    Creator Conversation の回答からObservation・口ぐせ・思い込みを抽出する（1コール）。
+
+    qa_pairs: [{"question": "...", "answer": "..."}, ...]
+
+    戻り値:
+        observations   : Observationリスト（最重要、複数）
+        口ぐせ         : 専門家が自然に使う言葉・フレーズ
+        思い込み       : クライアントがよく持つ誤解
+        expert_thinking: 専門家の思考プロセス・判断軸
+        speaker_words  : そのまま投稿の台本になりうるセリフ（改行区切り）
+        raw_qa         : 元のQ&A（保存用）
+    """
+    qa_text = "\n\n".join(
+        f"Q: {p['question']}\nA: {p['answer']}"
+        for p in qa_pairs
+        if p.get("answer", "").strip()
+    )
+
+    if not qa_text.strip():
+        return {
+            "observations": [], "口ぐせ": "", "思い込み": "",
+            "expert_thinking": "", "speaker_words": "", "raw_qa": qa_pairs,
+        }
+
+    prompt = (
+        "以下は専門家との会話記録です。\n\n"
+        f"{qa_text}\n\n"
+        "この会話から以下を抽出してください。\n\n"
+        "【observations】専門家が繰り返し気づいていること（配列、1〜5件）\n"
+        "  例: [\"朝起きると顎が疲れている人が多い\", \"頑張り屋さんほど食いしばる\"]\n\n"
+        "【口ぐせ】専門家が自然に使う言葉・フレーズ（1〜2文）\n"
+        "  例: 「流す前に、緩める」\n\n"
+        "【思い込み】クライアントがよく持つ誤解・勘違い（1文）\n"
+        "  例: マッサージで流せばむくみが取れると思っている\n\n"
+        "【expert_thinking】専門家がどう考えるか・判断するか（1〜2文）\n"
+        "  例: 私はまず咬筋を見ます。顔のたるみの多くは咬筋が原因だから。\n\n"
+        "【speaker_words】そのまま投稿の台本になりうるセリフ（改行区切り）\n"
+        "  ※専門家の言葉をできるだけそのまま使う\n\n"
+        '{"observations":["..."],"口ぐせ":"...","思い込み":"...","expert_thinking":"...","speaker_words":"..."}'
+    )
+
+    try:
+        raw = _call_openai(prompt, system_prompt=_CONVERSATION_EXTRACT_SYSTEM,
+                           label="creator conversation: Observation抽出")
+        import json as _json
+        data = _json.loads(raw)
+        obs = data.get("observations", [])
+        if isinstance(obs, str):
+            obs = [obs] if obs else []
+        return {
+            "observations":    obs,
+            "口ぐせ":          str(data.get("口ぐせ",          "")).strip(),
+            "思い込み":        str(data.get("思い込み",        "")).strip(),
+            "expert_thinking": str(data.get("expert_thinking", "")).strip(),
+            "speaker_words":   str(data.get("speaker_words",   "")).strip(),
+            "raw_qa":          qa_pairs,
+        }
+    except Exception as e:
+        print(f"  ⚠️ Observation抽出失敗: {e}")
+        return {
+            "observations": [], "口ぐせ": "", "思い込み": "",
+            "expert_thinking": "", "speaker_words": "", "raw_qa": qa_pairs,
         }
