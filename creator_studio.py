@@ -2399,6 +2399,8 @@ def _build_from_meeting_topic(
     world_ctx: Optional[dict] = None,
     audience_psych: Optional[dict] = None,
     conversation: Optional[dict] = None,
+    mission: str = "教育",
+    mission_hint: str = "",
 ) -> Optional[dict]:
     """
     6ステップ生成フロー の Step4〜6（コンテンツ生成部分）。
@@ -2422,8 +2424,17 @@ def _build_from_meeting_topic(
     if not em_theme:
         return None
 
-    cta_map = {"保存": _CTA_SAVE, "フォロー": _CTA_FOLLOW, "問い合わせ": _CTA_DM}
-    cta_str = cta_map.get(cta_type, _CTA_SAVE)
+    # Mission に応じて CTA を決定する（Mission First）
+    import post_mission as _pm
+    _m_def = _pm.POST_MISSIONS.get(mission, {})
+    if mission == "予約":
+        cta_str = _CTA_DM
+    elif mission in ("共感", "信頼", "驚き"):
+        cta_str = _CTA_FOLLOW
+    else:
+        # 教育・行動 → 保存。Editorial Meeting の cta_type も参考にする
+        cta_map = {"保存": _CTA_SAVE, "フォロー": _CTA_FOLLOW, "問い合わせ": _CTA_DM}
+        cta_str = cta_map.get(cta_type, _CTA_SAVE)
 
     world_ctx      = world_ctx      or {}
     audience_psych = audience_psych or {}
@@ -2533,10 +2544,10 @@ def _build_from_meeting_topic(
         pass
     caption = "\n".join(p for p in cap_parts if p is not None)
 
+    mission_label = _pm.POST_MISSIONS.get(mission, {}).get("label", mission)
     tmpl = {
         "theme":         em_theme,
-        "mission":       {"保存": "保存を狙う", "フォロー": "フォロワーを増やす",
-                          "問い合わせ": "問い合わせを増やす"}.get(cta_type, "保存を狙う"),
+        "mission":       mission_label,  # POST MISSION を mission フィールドに格納
         "hook":          actual_hook,
         "hook_text":     actual_hook[:35],
         "script_full":   script_body,
@@ -2547,7 +2558,7 @@ def _build_from_meeting_topic(
         "threads_text":  f"{actual_hook}\n\n{script_body[:120]}",
         "cut_count":     cut_count,
         "total_sec":     total_sec,
-        # 6ステップコンテキストを格納（表示・デバッグ用）
+        # 6ステップ + Mission コンテキスト（表示・デバッグ用）
         "_persona_brief":      brief,
         "_world_context":      world_ctx,
         "_audience_psychology": audience_psych,
@@ -2556,6 +2567,8 @@ def _build_from_meeting_topic(
             "goal":      account_goal,
             "principle": content_principle,
         },
+        "_post_mission":  mission,
+        "_mission_hint":  mission_hint,
     }
 
     why = (
@@ -2604,8 +2617,16 @@ def generate_creator_studio_daily() -> Optional[dict]:
     import editorial_meeting as em
     import world_context as wc
     import creator_conversation as cc
+    import post_mission as pm
 
     today = datetime.date.today().isoformat()
+
+    # ── Step 0: POST MISSION FIRST — 投稿の目的を最初に確定 ───────────
+    mission = pm.select_mission(
+        today=today,
+        vertical_goal="セルフケア教育",
+    )
+    mission_hint = pm.get_mission_hint(mission)
 
     # ── ① World Context: 社会・生活・心理トレンドを収集 ──────────────
     print("\n  ① World Context を取得中...")
@@ -2642,6 +2663,8 @@ def generate_creator_studio_daily() -> Optional[dict]:
         world_ctx=world_ctx,
         audience_psych=audience_psych,
         conversation=conversation,
+        mission=mission,
+        mission_hint=mission_hint,
     )
 
     if record is None:
@@ -2662,6 +2685,8 @@ def generate_creator_studio_daily() -> Optional[dict]:
             world_ctx=world_ctx,
             audience_psych=audience_psych,
             conversation=conversation,
+            mission=mission,
+            mission_hint=mission_hint,
         )
         if rebuilt:
             record = rebuilt
@@ -2669,8 +2694,35 @@ def generate_creator_studio_daily() -> Optional[dict]:
             record["theme"]       = em_theme
             record["video_title"] = em_theme
 
+    # Mission を record に付加（Achievement Check に使う）
+    pm.apply_mission_to_record(record, mission)
+
     # ── QA Loop: Audience Stop Check（80点未満は再生成）────────────────
     record = _quality_assurance_loop(record)
+
+    # ── Mission Achievement Check ────────────────────────────────────
+    # 投稿全体がMissionと一致しているか検証。不一致なら再生成（最大2回）
+    for _mac_attempt in range(2):
+        mac_result = pm.check_mission_achievement(record, mission)
+        record["_mission_check"] = mac_result
+        if mac_result.all_pass:
+            break
+        print(f"  ⚠️ Mission Achievement Check 失敗（{_mac_attempt+1}回目）→ 再生成")
+        for issue in mac_result.issues:
+            print(f"     ・{issue}")
+        rebuilt = _build_from_meeting_topic(
+            today, meeting,
+            world_ctx=world_ctx,
+            audience_psych=audience_psych,
+            conversation=conversation,
+            mission=mission,
+            mission_hint=mission_hint,
+        )
+        if rebuilt:
+            pm.apply_mission_to_record(rebuilt, mission)
+            record = _quality_assurance_loop(rebuilt)
+        else:
+            break
 
     # メタ情報を record に格納
     record["_editorial_meeting"] = meeting
@@ -2690,11 +2742,20 @@ def generate_creator_studio_daily() -> Optional[dict]:
 
 def print_creator_studio_summary(record: dict) -> None:
     import editorial_meeting as em
+    import post_mission as pm
 
-    # ── Editorial Meeting を最初に表示 ───────────────────────────────
-    meeting = record.get("_editorial_meeting")
-    if meeting:
-        em.print_editorial_meeting(meeting)
+    # ── POST MISSION を最初に表示 ────────────────────────────────────
+    post_m = record.get("_post_mission", "")
+    if post_m and post_m in pm.POST_MISSIONS:
+        _m = pm.POST_MISSIONS[post_m]
+        W0 = 60
+        print()
+        print("┌" + "─" * (W0 - 2) + "┐")
+        print(f"│  🎯 POST MISSION                                           │"[:W0 + 1] + "│")
+        print(f"│  {_m['label']:<56}│")
+        print(f"│  目的: {_m['purpose']:<54}│"[:W0 + 1] + "│")
+        print(f"│  KPI:  {_m['kpi']:<55}│"[:W0 + 1] + "│")
+        print("└" + "─" * (W0 - 2) + "┘")
 
     W = 64
     THICK = "━" * W
@@ -3101,5 +3162,11 @@ def print_creator_studio_summary(record: dict) -> None:
                 print(f"\n  【次回Hook改善メモ】視聴者の本音ゲート")
                 body(advice_hook, indent=4)
         print(f"  {'─'*50}")
+
+    # ── Mission Achievement Check ──────────────────────────────────────
+    mac_result = record.get("_mission_check")
+    post_m     = record.get("_post_mission", "")
+    if mac_result and post_m:
+        pm.print_mission_achievement_check(mac_result, post_m)
 
     print(f"\n{THICK}\n")
