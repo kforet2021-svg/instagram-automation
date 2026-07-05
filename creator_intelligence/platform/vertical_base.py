@@ -41,8 +41,10 @@ class BrandRules:
     mission: str                        # Vertical の存在意義
     target: str                         # 誰に向けて発信するか
     tone: str                           # 語り口・雰囲気
+    brand_domain: str = ""              # この専門家が扱う領域（Topic Brand Filter に使う）
     ng_words: list = field(default_factory=list)       # 使ってはいけない語
     ng_concepts: list = field(default_factory=list)    # 避けるべき概念・表現
+    off_brand_topics: list = field(default_factory=list)  # 領域外のTopicの例（プロンプトで除外）
     cta_save: str = "保存して、気になったときに読み返してください。"
     cta_follow: str = "フォローすると、毎週情報をお届けします。"
     cta_contact: str = "ご予約・ご相談はプロフィールのリンクからどうぞ。"

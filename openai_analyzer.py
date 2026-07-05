@@ -537,7 +537,7 @@ def get_world_context_trends(today: str, season_context: dict, region: str = "")
     uv       = season_context.get("uv_level", "")
     pollen   = season_context.get("pollen_level", "")
 
-    region_line = f"地域: {region}（全国ニュースよりこの地域の状況を優先してください）\n" if region else ""
+    region_line = f"地域: {region}（全国ニュースよりこの地域の状況を最優先）\n" if region else ""
     prompt = (
         f"今日: {today}（{season}・{month}月）\n"
         f"{region_line}"
@@ -545,13 +545,16 @@ def get_world_context_trends(today: str, season_context: dict, region: str = "")
         f"紫外線: {uv} / 花粉: {pollen}\n"
         f"イベント・連休: {holiday}\n\n"
         "この日付・季節・地域を踏まえて、以下を推測・合成してください。\n"
-        "※地域特有の気候・文化・生活スタイルがある場合は必ず反映する。\n\n"
+        "※地域特有の気候・文化・気温・湿度・生活スタイルがある場合は必ず反映する。\n\n"
         "【social_trends】社会で今起きていること（3〜5点、箇条書き）\n"
-        "  ニュース・AI動向・経済・制度変更・スポーツ・映画・ドラマなど\n\n"
+        "  ニュース・AI動向・経済・制度変更・スポーツ・映画・ドラマ\n"
+        "  Google/YouTube検索トレンド・Pinterest・Yahoo知恵袋で話題のこと\n\n"
         "【life_trends】人々の生活がどう変わっているか（3〜5点、箇条書き）\n"
-        "  消費動向・検索トレンド・SNS・旅行・Amazon/楽天・口コミ傾向など\n\n"
+        "  消費動向・SNS（Instagram/Threads/TikTok）・旅行・口コミ傾向\n"
+        "  今月の気温・湿度・紫外線が生活習慣に与えている影響\n\n"
         "【psychology_trends】今人々が感じていること（3〜5点、箇条書き）\n"
-        "  不安・期待・疲れ・欲求・関心の変化など\n\n"
+        "  不安・期待・疲れ・欲求・関心の変化\n"
+        "  生活者心理: 今月の「したいこと・やめたいこと・気になること」\n\n"
         "【hot_tension】今この瞬間の最大関心事・緊張感（1文、30文字以内）\n\n"
         "【audience_mood】30〜40代女性の今の気分・心理（1〜2文）\n"
         "  ※美容・健康・セルフケアに関心がある層を想定\n\n"
@@ -741,7 +744,95 @@ def extract_conversation_insights(qa_pairs: list) -> dict:
         }
 
 
-# ── Observation Only 抽出（投稿生成から完全分離）────────────────────────────
+# ── Creator Conversation: Topic深掘り質問生成 ────────────────────────────────
+
+_TOPIC_DEEP_Q_SYSTEM = (
+    "あなたはCreator Intelligence PlatformのCreator Conversation Engineです。\n"
+    "選ばれたTopicについて専門家に3〜5問の具体的な質問をします。\n\n"
+    "【禁止】\n"
+    "  ✗ 「最近気になることは？」（抽象すぎる）\n"
+    "  ✗ 「最近驚いたことは？」（抽象すぎる）\n"
+    "  ✗ 「最近増えた相談は？」（抽象すぎる）\n"
+    "  ✗ 知識・理論を聞く質問\n"
+    "  ✗ 30秒以上かかる質問\n\n"
+    "【良い質問】\n"
+    "  ○ 「今日最後のお客様は何に悩んでいましたか？」\n"
+    "  ○ 「今日一番多かった悩みは？」（選択肢付き）\n"
+    "  ○ 「今日一番言った言葉は？」\n"
+    "  ○ 「最近『それ違いますよ』と伝えたことは？」\n"
+    "  ○ 「今日なら何をセルフケアとして伝えますか？」\n\n"
+    "選択肢がある質問には choices を3〜4個付けてください。\n"
+    "30秒以内で答えられる質問だけを作ってください。\n"
+    "回答は必ずJSON形式で。"
+)
+
+_TOPIC_DEEP_Q_FALLBACK = [
+    {"question": "今日最後のお客様は何に悩んでいましたか？", "choices": []},
+    {"question": "このテーマで今日一番言った言葉は？", "choices": []},
+    {"question": "お客様がよくしている勘違いは？", "choices": [
+        "自分では気づいていない",
+        "マッサージすれば解決すると思っている",
+        "骨格の問題だと諦めている",
+        "その他",
+    ]},
+    {"question": "今日なら何をセルフケアとして伝えますか？", "choices": []},
+]
+
+
+def generate_topic_deep_questions(
+    topic: dict,
+    world_context: dict,
+    vertical_name: str = "専門家",
+) -> list:
+    """
+    選ばれたTopicについて深掘りする具体質問を生成する（1コール）。
+
+    回答形式: 選択肢 + 一言入力。30秒以内で答えられる質問のみ。
+
+    戻り値: [{"question": "...", "choices": ["...", ...]}, ...]  3〜5件
+    失敗時はデフォルト質問リスト。
+    """
+    theme      = topic.get("theme", "")
+    reason     = topic.get("reason", "")
+    season     = world_context.get("season", "")
+    hot        = world_context.get("hot_tension", "")
+    region     = world_context.get("region", "")
+
+    prompt = (
+        f"専門家: {vertical_name}\n"
+        f"選ばれたTopic: 「{theme}」\n"
+        f"このTopicの理由: {reason}\n"
+        f"今の季節: {season}（地域: {region}）\n"
+        f"今の関心事: {hot}\n\n"
+        f"このTopicについて専門家に3〜5問の具体的な質問を作ってください。\n\n"
+        "【質問のルール】\n"
+        "  ・30秒以内で答えられる具体的な質問のみ\n"
+        "  ・「今日」「最後のお客様」「最近言った言葉」など現場感のある質問\n"
+        "  ・選択肢がある場合は choices に3〜4個入れる\n"
+        "  ・選択肢がない質問は choices: [] とする\n\n"
+        'JSON: {"questions": [{"question":"...","choices":["...",...]}, ...]}'
+    )
+
+    try:
+        raw = _call_openai(prompt, system_prompt=_TOPIC_DEEP_Q_SYSTEM,
+                           label="creator conversation: 深掘り質問生成")
+        import json as _json
+        data = _json.loads(raw)
+        qs = data.get("questions", [])
+        cleaned = []
+        for item in qs:
+            q = str(item.get("question", "")).strip()
+            if not q:
+                continue
+            c = [str(x).strip() for x in item.get("choices", []) if str(x).strip()]
+            cleaned.append({"question": q, "choices": c})
+        return cleaned[:5] if cleaned else _TOPIC_DEEP_Q_FALLBACK
+    except Exception as e:
+        print(f"  ⚠️ 深掘り質問生成失敗（デフォルト使用）: {e}")
+        return _TOPIC_DEEP_Q_FALLBACK
+
+
+# ── Observation Only 抽出（投稿生成から完全分離）────────────────────────────────
 
 _OBSERVATION_ONLY_SYSTEM = (
     "あなたはCreator Intelligence PlatformのObservation収集エンジンです。\n"
@@ -836,14 +927,27 @@ def extract_observations_only(qa_pairs: list) -> dict:
 _TOPIC_CANDIDATES_SYSTEM = (
     "あなたはCreator Intelligence PlatformのTopic Intelligence Engineです。\n"
     "専門家が「今日はこれ話したら面白そう」と思えるテーマ候補を提案します。\n\n"
-    "【禁止】\n"
-    "  ✗ 投稿文・台本・キャプションを書く\n"
-    "  ✗ 「〜についての投稿を作りましょう」という提案\n"
-    "  ✗ 一般論・どの専門家でも言えること\n\n"
-    "【必須】\n"
-    "  ○ 「今日・今の季節・この地域だから面白い」テーマ\n"
-    "  ○ 専門家の現場観察から生まれたテーマ\n"
-    "  ○ 読者が「え、それ私のこと？」と思えるテーマ\n"
+    "【Topic生成の優先比率】\n"
+    "  Observation（専門家の現場気づき）: 70%\n"
+    "  World Context（季節・社会・地域）: 20%\n"
+    "  SNSトレンド（Instagram/TikTok等）: 10%\n"
+    "  ObservationがあればObservationを最優先にする。\n\n"
+    "【Topic Brand Filter — 最重要ルール】\n"
+    "  各Topicを提案する前に必ず確認する:\n"
+    "  「このTopicは他の健康アカウント（栄養士・整体師・ヨガ講師など）でも話せますか？」\n"
+    "  → YESなら却下。この専門家だから話せる内容だけ残す。\n\n"
+    "【禁止Topic例】\n"
+    "  ✗ 熱中症対策（顔専門でない全身の話）\n"
+    "  ✗ 夏野菜・食事全般\n"
+    "  ✗ 旅行・レジャー\n"
+    "  ✗ 健康ニュース紹介・AIアプリ紹介\n"
+    "  ✗ 一般論だけの内容\n"
+    "  ✗ 投稿文・台本・キャプションを書く\n\n"
+    "【必須: 3つの交差点】\n"
+    "  ○ Observation（専門家の現場気づき）\n"
+    "  ○ World Context（今日の社会・季節・地域）\n"
+    "  ○ ブランド領域（この専門家が扱う専門分野）\n"
+    "  3つが交わるところにだけTopicを作る。\n"
     "回答は必ずJSON形式で。"
 )
 
@@ -853,9 +957,14 @@ def generate_topic_candidates_ai(
     observations: list,
     vertical_name: str = "専門家",
     region: str = "",
+    brand_domain: str = "",
+    off_brand_topics: list = None,
 ) -> list:
     """
-    World Context × Observation からTopic候補を生成する（1コール）。
+    World Context × Observation × Brand Domain からTopic候補を生成する（1コール）。
+
+    Brand Filter: 他の健康アカウントでも話せる内容は却下。
+    この専門家だから話せる内容だけを返す。
 
     戻り値: [{"theme": "...", "stars": 5, "why_now": "...", "who": "...", "why_expert": "..."}, ...]
     失敗時は空リスト。
@@ -874,8 +983,23 @@ def generate_topic_candidates_ai(
             for o in observations
         ]
         obs_text = "【専門家のObservation（現場から）】\n" + "\n".join(obs_lines) + "\n\n"
+    else:
+        obs_text = "【専門家のObservation】（本日は未入力）\n\n"
 
     region_line = f"地域: {region}\n" if region else ""
+
+    brand_line = ""
+    if brand_domain:
+        brand_line = f"【ブランド領域（この専門家が扱う専門分野）】\n{brand_domain}\n\n"
+
+    off_brand_line = ""
+    if off_brand_topics:
+        examples = "、".join(off_brand_topics[:5])
+        off_brand_line = (
+            f"【Topic Brand Filter — 却下例】\n"
+            f"以下のようなTopicは「他の健康アカウントでも話せる」ため却下:\n"
+            f"  {examples}\n\n"
+        )
 
     prompt = (
         f"専門家: {vertical_name}\n"
@@ -885,19 +1009,29 @@ def generate_topic_candidates_ai(
         f"社会トレンド: {social[:200] if social else '（なし）'}\n"
         f"生活トレンド: {life[:200] if life else '（なし）'}\n"
         f"人々の心理: {psych[:200] if psych else '（なし）'}\n\n"
+        f"{brand_line}"
+        f"{off_brand_line}"
         f"{obs_text}"
-        "上記を踏まえて、この専門家が「今日話したくなる」テーマを5〜8案提案してください。\n\n"
-        "【評価基準】\n"
-        "  ★★★★★: 今日この地域でこの専門家にしか言えない\n"
-        "  ★★★★☆: タイムリーで専門家らしい\n"
-        "  ★★★☆☆: まあまあ面白い\n\n"
+        "【生成ルール】\n"
+        "  1. まずObservationを全て読む（最優先70%）\n"
+        "  2. Observationから話せるTopicを先に作る\n"
+        "  3. World Context（20%）で「なぜ今か」を強化する\n"
+        "  4. SNSトレンド（10%）は補足のみ\n"
+        "  5. Brand Filterを通す: 他の健康アカウントでも話せるなら却下\n\n"
+        "この専門家が「今日話したくなる」テーマを5〜10案提案してください。\n\n"
+        "【評価基準（stars）】\n"
+        "  5: Observation直結 × この専門家にしか言えない × 今日だから刺さる\n"
+        "  4: Observation由来 × 専門家らしく × タイムリー\n"
+        "  3: まあまあ専門家らしい\n"
+        "  2以下: 他でも話せる内容のため提案しない\n\n"
         "各テーマに:\n"
-        "  theme     : テーマ（20文字以内。投稿タイトルではなく「話題の核」）\n"
-        "  stars     : 1〜5（整数）\n"
+        "  theme     : テーマ（20文字以内。話題の核だけ）\n"
+        "  stars     : 3〜5（整数。2以下は提案しない）\n"
+        "  reason    : 組み合わせの理由（例: 「Observation×紫外線」「睡眠×食いしばり」）\n"
         "  why_now   : なぜ今なのか（30文字以内）\n"
         "  who       : 誰に刺さるか（20文字以内）\n"
-        "  why_expert: なぜ専門家らしいか（30文字以内）\n\n"
-        'JSON: {"candidates": [{"theme":"...","stars":5,"why_now":"...","who":"...","why_expert":"..."}, ...]}'
+        "  why_expert: なぜこの専門家だから言えるか（30文字以内）\n\n"
+        'JSON: {"candidates": [{"theme":"...","stars":5,"reason":"...","why_now":"...","who":"...","why_expert":"..."}, ...]}'
     )
 
     try:
@@ -914,6 +1048,7 @@ def generate_topic_candidates_ai(
             cleaned.append({
                 "theme":      theme,
                 "stars":      max(1, min(5, int(item.get("stars", 3)))),
+                "reason":     str(item.get("reason", "")).strip(),
                 "why_now":    str(item.get("why_now", "")).strip(),
                 "who":        str(item.get("who", "")).strip(),
                 "why_expert": str(item.get("why_expert", "")).strip(),

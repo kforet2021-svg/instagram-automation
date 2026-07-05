@@ -11,26 +11,26 @@ expert_interview.py — DEPRECATED
 """
 
 # 後方互換シム: 旧呼び出しを新モジュールに委譲
-from creator_conversation import (
-    run_creator_conversation as _run_cc,
-    format_observations_for_display as format_interview_for_display,  # noqa: F401
-)
+from creator_conversation import format_observations_for_display as format_interview_for_display  # noqa: F401
 
 
 def run_expert_interview(theme: str = "", today: str = "", vertical_name: str = "専門家",
                          skip_if_no_tty: bool = True):
     """
     廃止済み。Creator Conversation を使用してください。
-    互換性のため world_context なしで呼び出せるようシムを提供。
+    シグネチャ変更（selected_topic必須）のため、ダミーTopicを渡す。
     """
+    from creator_conversation import run_creator_conversation
     import world_context as wc
     world_ctx = wc.get_season_context(today or "2026-01-01")
     world_ctx.update({
         "social_trends": "", "life_trends": "",
         "psychology_trends": "", "hot_tension": theme,
-        "audience_mood": "",
+        "audience_mood": "", "region": "",
     })
-    return _run_cc(
+    dummy_topic = {"theme": theme or "（テーマ未設定）", "stars": 3, "reason": ""}
+    return run_creator_conversation(
+        selected_topic=dummy_topic,
         world_context=world_ctx,
         today=today,
         vertical_name=vertical_name,

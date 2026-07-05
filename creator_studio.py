@@ -2700,11 +2700,16 @@ def generate_phase1_daily() -> dict:
     )
 
     # ── ③ Topic Intelligence: Topic候補を生成 ────────────────────────────
-    print("\n  ③ Topic Intelligence — テーマを生成中...")
+    # Brand Filter: World Context × Observation × ブランド領域 の交差点のみ通過
+    print("\n  ③ Topic Intelligence — テーマを生成中（Brand Filter 適用）...")
+    brand_domain     = getattr(_BRAND, "brand_domain", "")
+    off_brand_topics = getattr(_BRAND, "off_brand_topics", [])
     candidates = ti.generate_topic_candidates(
         world_ctx=world_ctx,
         observations=observations,
         vertical_name=vertical_name,
+        brand_domain=brand_domain,
+        off_brand_topics=off_brand_topics,
     )
 
     ti.print_topic_candidates(candidates)
@@ -2712,14 +2717,28 @@ def generate_phase1_daily() -> dict:
     # ── ユーザー選択（対話環境のみ）─────────────────────────────────────
     selected = ti.select_topic_interactive(candidates)
 
+    # ── Creator Conversation（Topic選択後に開始）────────────────────────
+    conversation = None
+    if selected:
+        import creator_conversation as cc
+        conversation = cc.run_creator_conversation(
+            selected_topic=selected,
+            world_context=world_ctx,
+            today=today,
+            vertical_name=vertical_name,
+        )
+
     if selected:
         print()
-        print("  ✅ Phase 1 完了。選択テーマ: 「" + selected["theme"] + "」")
-        print("  次: Conversation → Observation整理 → 投稿生成")
+        print("  ✅ Phase 1 完了。")
+        if conversation:
+            print(f"  Conversation: {len(conversation.get('observations', []))}件のObservation収集")
+        else:
+            print("  Conversation: スキップ（次回実行時に選択してください）")
     else:
         print()
         print("  ✅ Phase 1 完了。テーマ候補を生成しました。")
-        print("  テーマを選んだら Conversation を開始できます。")
+        print("  テーマを選ぶと Conversation を開始できます。")
 
     print()
 
@@ -2729,6 +2748,7 @@ def generate_phase1_daily() -> dict:
         "observations":     observations,
         "topic_candidates": candidates,
         "selected_topic":   selected,
+        "conversation":     conversation,
     }
 
 
