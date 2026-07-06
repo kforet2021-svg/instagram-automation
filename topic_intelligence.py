@@ -365,14 +365,15 @@ def print_topic_candidates(candidates: list) -> None:
 
     for i, c in enumerate(candidates, 1):
         hook      = c.get("hook") or c.get("theme", "")
+        angle     = c.get("angle", "")
         post_type = c.get("post_type", "共感")
         icon      = _POST_TYPE_ICON.get(post_type, post_type)
         reason    = c.get("reason", "")
         print()
-        print(f"  [{i:2}]  {icon}")
+        angle_tag = f"  [{angle}]" if angle else ""
+        print(f"  [{i:2}]  {icon}{angle_tag}")
         print(f"        「{hook}」")
         if reason:
-            # 最大2行に折り返す
             import textwrap as _tw
             for line in _tw.wrap(reason, width=46):
                 print(f"         {line}")
