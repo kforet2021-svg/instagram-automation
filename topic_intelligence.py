@@ -339,14 +339,23 @@ def ask_hook_reality(
 
 # ── 表示 ─────────────────────────────────────────────────────────────────────
 
+_POST_TYPE_ICON = {
+    "保存":    "📌 保存",
+    "共感":    "💬 共感",
+    "信頼":    "🔍 信頼",
+    "行動":    "✋ 行動",
+    "Threads": "🧵 Threads",
+}
+
+
 def print_topic_candidates(candidates: list) -> None:
-    """Hook Intelligence 出力。Instagram 1枚目 / Threads 1行目レベルで表示する。"""
+    """Phase 1 出力。毎朝3分で「今日はこれにしよう」と選べる表示。"""
     W = 60
 
     print()
     print("=" * W)
-    print("  ③ HOOK INTELLIGENCE — 今日話したい文章")
-    print("     Instagram 1枚目 / Threads 1行目")
+    print("  今日のHook候補")
+    print("  ─ Instagram 1枚目 / Threads 1行目 ─")
     print("=" * W)
 
     if not candidates:
@@ -355,22 +364,23 @@ def print_topic_candidates(candidates: list) -> None:
         return
 
     for i, c in enumerate(candidates, 1):
-        stars_n = c.get("stars", 3)
-        stars   = "★" * stars_n + "☆" * (5 - stars_n)
-        hook    = c.get("hook") or c.get("theme", "")
+        hook      = c.get("hook") or c.get("theme", "")
+        post_type = c.get("post_type", "共感")
+        icon      = _POST_TYPE_ICON.get(post_type, post_type)
+        reason    = c.get("reason", "")
         print()
-        print(f"  [{i}] {stars}")
-        print(f"      「{hook}」")
-        if c.get("reason"):
-            print(f"       理由: {c['reason']}")
-        if c.get("why_now"):
-            print(f"       今: {c['why_now']}")
-        if c.get("who"):
-            print(f"       誰: {c['who']}")
+        print(f"  [{i:2}]  {icon}")
+        print(f"        「{hook}」")
+        if reason:
+            # 最大2行に折り返す
+            import textwrap as _tw
+            for line in _tw.wrap(reason, width=46):
+                print(f"         {line}")
 
     print()
-    print("-" * W)
-    print(f"  {len(candidates)}案のHook候補を生成しました。")
+    print("=" * W)
+    print(f"  番号を入力して「今日のHook」を選んでください")
+    print("=" * W)
     print()
 
 

@@ -1057,24 +1057,21 @@ def generate_topic_candidates_ai(
         "  Step4. Brand Filterを通す:\n"
         "         「このHookは美容雑誌でも作れますか？」→ YESなら却下\n\n"
         "スクロールが止まるHook文を10案提案してください。\n\n"
-        "【評価基準（stars）】\n"
-        "  5: 今この瞬間にInstagram/Threadsで最も反応されそう × 専門家だけが言える\n"
-        "  4: タイムリー × 専門家らしく × 具体的\n"
-        "  3: まあまあ使えるが美容雑誌でも作れるかもしれない\n"
-        "  2以下: 提案しない\n\n"
-        "各テーマに:\n"
-        "  hook      : Instagramの1枚目/Threadsの1行目になる文章（15〜30文字）\n"
+        "ちょうど10案、スクロールが止まるHook文を提案してください。\n\n"
+        "各Hookに:\n"
+        "  hook      : Instagram1枚目/Threads1行目になる一文（15〜30文字）\n"
         "              お客様が実際に使う言葉。スクロールが止まる文章。\n"
         "              NG: 「表情筋と紫外線」「顔の日焼け後のケア」\n"
         "              OK: 「朝起きると顔がかたい人へ。」「笑いにくいのは年齢だけじゃない。」\n"
-        "              OK: 「その顔の疲れ、暑さじゃないかもしれません。」\n"
-        "  theme     : 内部テーマ識別子（10文字以内。hookの元ネタ）\n"
-        "  stars     : 3〜5（整数）\n"
-        "  reason    : 組み合わせの根拠（例: 「Pain×食いしばり」「Observation×紫外線×北海道」）\n"
-        "  why_now   : なぜ今なのか（30文字以内）\n"
-        "  who       : 誰に刺さるか（20文字以内）\n"
-        "  why_expert: なぜ美容雑誌ではなくこの専門家だから言えるか（30文字以内）\n\n"
-        'JSON: {"candidates": [{"hook":"...","theme":"...","stars":5,"reason":"...","why_now":"...","who":"...","why_expert":"..."}, ...]}'
+        "  theme     : 内部テーマ識別子（10文字以内）\n"
+        "  post_type : 投稿タイプ（次の5つから1つ選ぶ）\n"
+        "              保存  … 役立つ情報・方法・リスト（保存したくなる）\n"
+        "              共感  … 「わかる」「これ私だ」と感じる悩み・あるある\n"
+        "              信頼  … 専門家の視点・事実・データ（信頼を高める）\n"
+        "              行動  … 今すぐやってみたくなるセルフケア・チェック\n"
+        "              Threads … Threadsで会話が生まれる問いかけ・本音トーク\n"
+        "  reason    : 選定理由（1〜2行。なぜこのHookが今日刺さるか）\n\n"
+        'JSON: {"candidates": [{"hook":"...","theme":"...","post_type":"保存","reason":"..."}, ...]}'
     )
 
     try:
@@ -1092,16 +1089,17 @@ def generate_topic_candidates_ai(
                 continue
             if not hook:
                 hook = theme
+            _VALID_TYPES = {"保存", "共感", "信頼", "行動", "Threads"}
+            post_type = str(item.get("post_type", "")).strip()
+            if post_type not in _VALID_TYPES:
+                post_type = "共感"
             cleaned.append({
-                "hook":       hook,
-                "theme":      theme or hook,
-                "stars":      max(1, min(5, int(item.get("stars", 3)))),
-                "reason":     str(item.get("reason", "")).strip(),
-                "why_now":    str(item.get("why_now", "")).strip(),
-                "who":        str(item.get("who", "")).strip(),
-                "why_expert": str(item.get("why_expert", "")).strip(),
+                "hook":      hook,
+                "theme":     theme or hook,
+                "post_type": post_type,
+                "reason":    str(item.get("reason", "")).strip(),
             })
-        return sorted(cleaned, key=lambda x: x["stars"], reverse=True)
+        return cleaned
     except Exception as e:
         print(f"  ⚠️ Topic候補生成失敗: {e}")
         return []
