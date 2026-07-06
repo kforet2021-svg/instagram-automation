@@ -1010,6 +1010,7 @@ def generate_topic_candidates_ai(
     brand_domain: str = "",
     off_brand_topics: list = None,
     past_obs_library: str = "",
+    hook_library_text: str = "",
 ) -> list:
     """
     Instagram/Threadsトレンド × World Context × ブランド領域 → Hook候補10案（1コール）。
@@ -1057,6 +1058,8 @@ def generate_topic_candidates_ai(
     if past_obs_library:
         lib_text = f"【過去Observation Library（繰り返し出る悩み）】\n{past_obs_library[:400]}\n\n"
 
+    hook_lib_text = f"{hook_library_text}\n\n" if hook_library_text else ""
+
     prompt = (
         f"専門家: {vertical_name}（オーナー: 森このみ）\n"
         f"{region_line}"
@@ -1066,11 +1069,16 @@ def generate_topic_candidates_ai(
         f"30〜40代女性の今の気分: {audience[:100] if audience else '（なし）'}\n\n"
         f"{brand_line}"
         f"{off_brand_line}"
+        f"{hook_lib_text}"
         f"{lib_text}"
         f"{obs_text}"
         "【生成手順 — 必ずこの順序】\n"
         "  Topic → CORE HARI視点 → 切り口 → Hook\n\n"
-        "  Step1. ブランド領域の【小さいTopic】を10個想定する\n"
+        "  Step0. Hook Libraryが提供されている場合:\n"
+        "         まずライブラリから今日の季節・World Contextに合うHookを探す。\n"
+        "         合うものがあれば「リライト」して使う。新規作成は最後の手段。\n"
+        "         リライト時は source='rewrite' として reason に元のHookを明記する。\n\n"
+        "  Step1. ライブラリで補えない分だけ新規Topic（小さい粒度）を想定する\n"
         "         （Instagram/Threadsトレンド・World Context・過去Observationから逆算）\n\n"
         "         【Topic粒度ルール — 必ず守る】\n"
         "         Topicは「30秒で1つだけ伝えられる」粒度にする。\n\n"
@@ -1125,6 +1133,7 @@ def generate_topic_candidates_ai(
                 "angle":       str(item.get("angle", "")).strip(),
                 "theme":       theme or hook,
                 "post_type":   post_type,
+                "source":      str(item.get("source", "new")).strip(),
                 "reason":      str(item.get("reason", "")).strip(),
             })
         return cleaned

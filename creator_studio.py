@@ -2692,17 +2692,23 @@ def generate_phase1_daily() -> dict:
     wc.print_world_context(world_ctx)
 
     # ── ② Hook Intelligence ──────────────────────────────────────────────
-    print("\n  ② Hook Intelligence — Instagram/Threadsトレンド × World Context...")
     vertical_name    = getattr(_BRAND, "display_name", "専門家")
     brand_domain     = getattr(_BRAND, "brand_domain", "")
     off_brand_topics = getattr(_BRAND, "off_brand_topics", [])
 
+    import hook_library as hl
+    lib_hooks    = hl.load_hooks(top_n=30)
+    hook_lib_text = hl.format_library_for_prompt(lib_hooks)
+    lib_label = f"Hook Library {len(lib_hooks)}件参照 → リライト優先" if lib_hooks else "Hook Library 空 → 新規作成"
+    print(f"\n  ② Hook Intelligence — {lib_label}")
+
     candidates = ti.generate_topic_candidates(
         world_ctx=world_ctx,
-        observations=[],       # Hook生成にObservationは不要
+        observations=[],
         vertical_name=vertical_name,
         brand_domain=brand_domain,
         off_brand_topics=off_brand_topics,
+        hook_library_text=hook_lib_text,
     )
 
     ti.print_topic_candidates(candidates)
@@ -2714,6 +2720,12 @@ def generate_phase1_daily() -> dict:
     reality = None
     if selected:
         reality = ti.ask_hook_reality(selected)
+        # 選んだHookをライブラリに保存
+        season = world_ctx.get("season", "")
+        source = selected.get("source", "new")
+        saved  = hl.save_hook(selected, season=season, source=source)
+        if saved:
+            print(f"  Hook Library に保存しました: 「{selected.get('hook', '')[:30]}」")
 
     if selected:
         print()

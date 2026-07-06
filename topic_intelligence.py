@@ -265,6 +265,7 @@ def generate_topic_candidates(
     brand_domain: str = "",
     off_brand_topics: list = None,
     past_obs_library: str = "",
+    hook_library_text: str = "",
     skip_if_no_tty: bool = True,
 ) -> list:
     """
@@ -286,6 +287,7 @@ def generate_topic_candidates(
             brand_domain=brand_domain,
             off_brand_topics=off_brand_topics or [],
             past_obs_library=past_obs_library,
+            hook_library_text=hook_library_text,
         )
     except Exception as e:
         print(f"  ⚠️ Hook候補生成失敗: {e}")
