@@ -1051,14 +1051,18 @@ def generate_topic_candidates_ai(
         "  3: まあまあ専門家らしいが美容雑誌でも作れるかもしれない\n"
         "  2以下: 提案しない\n\n"
         "各テーマに:\n"
-        "  theme     : 投稿タイトルレベルの具体的なテーマ（40文字以内）\n"
-        "              NG: 「紫外線対策」  OK: 「プールの日、首だけ焼けていませんか？」\n"
+        "  hook      : Instagramの1枚目/Threadsの1行目になる文章（15〜30文字）\n"
+        "              お客様が実際に使う言葉。スクロールが止まる文章。\n"
+        "              NG: 「表情筋と紫外線」「顔の日焼け後のケア」\n"
+        "              OK: 「朝起きると顔がかたい人へ。」「笑いにくいのは年齢だけじゃない。」\n"
+        "              OK: 「その顔の疲れ、暑さじゃないかもしれません。」\n"
+        "  theme     : 内部テーマ識別子（10文字以内。hookの元ネタ）\n"
         "  stars     : 3〜5（整数）\n"
         "  reason    : 組み合わせの根拠（例: 「Pain×食いしばり」「Observation×紫外線×北海道」）\n"
         "  why_now   : なぜ今なのか（30文字以内）\n"
         "  who       : 誰に刺さるか（20文字以内）\n"
         "  why_expert: なぜ美容雑誌ではなくこの専門家だから言えるか（30文字以内）\n\n"
-        'JSON: {"candidates": [{"theme":"...","stars":5,"reason":"...","why_now":"...","who":"...","why_expert":"..."}, ...]}'
+        'JSON: {"candidates": [{"hook":"...","theme":"...","stars":5,"reason":"...","why_now":"...","who":"...","why_expert":"..."}, ...]}'
     )
 
     try:
@@ -1069,11 +1073,16 @@ def generate_topic_candidates_ai(
         candidates = data.get("candidates", [])
         cleaned = []
         for item in candidates:
+            hook  = str(item.get("hook",  "")).strip()
             theme = str(item.get("theme", "")).strip()
-            if not theme:
+            # hook が空なら theme を hook として使う（フォールバック）
+            if not hook and not theme:
                 continue
+            if not hook:
+                hook = theme
             cleaned.append({
-                "theme":      theme,
+                "hook":       hook,
+                "theme":      theme or hook,
                 "stars":      max(1, min(5, int(item.get("stars", 3)))),
                 "reason":     str(item.get("reason", "")).strip(),
                 "why_now":    str(item.get("why_now", "")).strip(),

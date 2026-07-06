@@ -201,37 +201,37 @@ def generate_topic_candidates(
 # ── 表示 ─────────────────────────────────────────────────────────────────────
 
 def print_topic_candidates(candidates: list) -> None:
-    """Topic候補を ★★★★★ + 理由（X×Y）形式で表示する。"""
+    """Hook Intelligence 出力。Instagram 1枚目 / Threads 1行目レベルで表示する。"""
     W = 60
 
     print()
     print("=" * W)
-    print("  ③ TOPIC CANDIDATES — 今日話したいテーマ候補")
+    print("  ③ HOOK INTELLIGENCE — 今日話したい文章")
+    print("     Instagram 1枚目 / Threads 1行目")
     print("=" * W)
 
     if not candidates:
-        print("\n  （Topic候補を生成できませんでした）")
+        print("\n  （Hook候補を生成できませんでした）")
         print()
         return
 
     for i, c in enumerate(candidates, 1):
         stars_n = c.get("stars", 3)
         stars   = "★" * stars_n + "☆" * (5 - stars_n)
+        hook    = c.get("hook") or c.get("theme", "")
         print()
         print(f"  [{i}] {stars}")
-        print(f"      {c['theme']}")
+        print(f"      「{hook}」")
         if c.get("reason"):
-            print(f"      理由: {c['reason']}")
+            print(f"       理由: {c['reason']}")
         if c.get("why_now"):
-            print(f"      なぜ今: {c['why_now']}")
+            print(f"       今: {c['why_now']}")
         if c.get("who"):
-            print(f"      誰に:   {c['who']}")
-        if c.get("why_expert"):
-            print(f"      専門家: {c['why_expert']}")
+            print(f"       誰: {c['who']}")
 
     print()
     print("-" * W)
-    print(f"  {len(candidates)}案のテーマ候補を生成しました。")
+    print(f"  {len(candidates)}案のHook候補を生成しました。")
     print()
 
 
