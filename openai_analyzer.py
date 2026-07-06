@@ -556,7 +556,8 @@ def get_world_context_trends(today: str, season_context: dict, region: str = "")
         "  このブランドに影響する環境・生活情報だけ、3〜5項目、箇条書き。\n"
         "  含める: 紫外線・湿度・冷房・汗・写真機会・睡眠・姿勢・食いしばり・\n"
         "          顔のむくみ・暑さによる体の変化・表情グセに影響する環境\n"
-        "  除外: 旅行・AI・観光・経済・スポーツ・映画・政治・一般的な健康ニュース\n\n"
+        "  絶対に除外: 旅行・AI・観光・経済・スポーツ・映画・政治・一般健康ニュース・\n"
+        "              熱中症（顔に直接関係しない内容）・七夕・お盆などのイベント情報\n\n"
         "【hot_tension】今この瞬間の最大関心事・緊張感（1文、30文字以内）\n"
         "  ブランドに関係する文脈で。\n\n"
         "【audience_mood】30〜40代女性の今の気分・心理（1〜2文）\n"
@@ -569,7 +570,12 @@ def get_world_context_trends(today: str, season_context: dict, region: str = "")
                            label="world context: トレンド合成")
         import json as _json
         data = _json.loads(raw)
-        ctx_text = str(data.get("brand_relevant_context", "")).strip()
+        raw_ctx = data.get("brand_relevant_context", "")
+        # AIがJSON配列で返した場合に箇条書きテキストに変換
+        if isinstance(raw_ctx, list):
+            ctx_text = "\n".join(f"・{item}" for item in raw_ctx if item)
+        else:
+            ctx_text = str(raw_ctx).strip()
         return {
             "brand_relevant_context": ctx_text,
             "social_trends":          ctx_text,   # 後方互換
@@ -970,13 +976,26 @@ _TOPIC_CANDIDATES_SYSTEM = (
     "    ○ 「笑いにくいのは年齢だけじゃない。」（実は）\n"
     "    ○ 「頬が動かない人には共通点があります。」（共通点）\n"
     "    ○ 「プロが施術前に必ず確認する場所があります。」（専門家視点）\n\n"
-    "【Brand Filter】\n"
-    "  「このHookは美容雑誌でも作れますか？」→ YESなら却下。\n"
-    "  CORE HARIだから言える視点だけ残す。\n\n"
+    "【CORE HARI Filter — 最終判定】\n"
+    "  Hookを作ったら必ず自問する:\n"
+    "  「他の美容アカウントでも言えるか？」→ YESなら作り直す。\n\n"
+    "  判定基準: 「CORE HARIなら何と言うか」で書く。\n"
+    "  CORE HARIは顔専門（小顔矯正・顔筋トレーニング・たるみ改善）のサロン。\n"
+    "  毎日顔だけを見ているから言える視点でHookを作る。\n\n"
+    "  NG vs OK（必ずこのレベルまで落とし込む）:\n"
+    "    ✗ 「顔のむくみを解消するには」\n"
+    "    ○ 「むくみを流す前に確認してほしい場所があります。」\n\n"
+    "    ✗ 「紫外線対策」\n"
+    "    ○ 「首だけ日焼け止め忘れていませんか？」\n\n"
+    "    ✗ 「顔筋トレ」\n"
+    "    ○ 「頑張って顔トレしてるのに変わらない人へ。」\n\n"
+    "    ✗ 「たるみ対策」\n"
+    "    ○ 「たるみより先に見ている場所があります。」\n\n"
+    "  NG側は一般美容アカウントでも言える。OK側はCORE HARIだから言える。\n\n"
     "【禁止】\n"
-    "  ✗ 単なる質問文\n"
-    "  ✗ カテゴリ名・抽象的なテーマ\n"
-    "  ✗ 美容雑誌でも作れる内容\n"
+    "  ✗ 単なる質問文（「〜していますか？」「〜を知っていますか？」）\n"
+    "  ✗ カテゴリ名・抽象的なテーマ（「紫外線対策」「むくみ解消」など）\n"
+    "  ✗ 他の美容・健康アカウントでも言える内容\n"
     "  ✗ 投稿文・台本・キャプションを書く\n"
     "回答は必ずJSON形式で。"
 )
@@ -1054,8 +1073,9 @@ def generate_topic_candidates_ai(
         "  Step2. 各Topicに切り口を1つ割り当てる:\n"
         "         勘違い/実は/専門家視点/先にして/NG行動/比較/チェック/〜な人へ/共通点/ランキング\n"
         "  Step3. 切り口 × Topic → Hook文を作る（続きを見たいが最優先）\n"
-        "  Step4. Brand Filterを通す:\n"
-        "         「このHookは美容雑誌でも作れますか？」→ YESなら切り口を変えてやり直す\n\n"
+        "  Step4. CORE HARI Filterを通す:\n"
+        "         「他の美容アカウントでも言えるか？」→ YESなら切り口を変えてやり直す\n"
+        "         「CORE HARIなら何と言うか？」で書き直す\n\n"
         "ちょうど10案提案してください。\n\n"
         "各Hookに:\n"
         "  hook      : Instagram1枚目/Threads1行目になる一文（15〜35文字）\n"

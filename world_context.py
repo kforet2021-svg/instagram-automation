@@ -198,11 +198,20 @@ def print_world_context(ctx: dict) -> None:
 
     # ブランド関連情報だけ表示（3〜5項目）
     brand_ctx = ctx.get("brand_relevant_context", "") or ctx.get("social_trends", "")
+    # AIがlist文字列 "['...', '...']" を返した場合の保護
+    if brand_ctx and brand_ctx.startswith("["):
+        try:
+            import ast as _ast
+            parsed = _ast.literal_eval(brand_ctx)
+            if isinstance(parsed, list):
+                brand_ctx = "\n".join(f"・{item}" for item in parsed if item)
+        except Exception:
+            pass
     if brand_ctx:
         print()
         count = 0
         for line in brand_ctx.splitlines():
-            line = line.strip().lstrip("・-・•").strip()
+            line = line.strip().lstrip("・-・•'\"[],").strip()
             if line and count < 5:
                 print(f"  ・{line}")
                 count += 1

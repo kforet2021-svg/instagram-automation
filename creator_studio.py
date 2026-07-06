@@ -2757,24 +2757,28 @@ def print_phase1_summary(result: dict) -> None:
     if region or season:
         print(f"  地域: {region}  季節: {season}")
 
-    obs = result.get("observations", [])
-    if obs:
-        print(f"\n  【Observation × {len(obs)}件】")
-        for o in obs:
-            t = o.get("type", "気づき") if isinstance(o, dict) else "気づき"
-            c = o.get("content", o)    if isinstance(o, dict) else o
-            print(f"    [{t}] {c}")
+    reality = result.get("reality")
+    if reality:
+        t = reality.get("type", "")
+        c = reality.get("content", "")
+        print(f"\n  【リアリティ】[{t}] {c[:50]}")
 
-    candidates = result.get("topic_candidates", [])
+    candidates = result.get("hook_candidates") or result.get("topic_candidates", [])
     if candidates:
-        print(f"\n  【Topic候補 × {len(candidates)}案】")
+        print(f"\n  【Hook候補 × {len(candidates)}案】")
+        _icons = {"保存": "📌", "共感": "💬", "信頼": "🔍", "行動": "✋", "Threads": "🧵"}
         for i, c in enumerate(candidates, 1):
-            stars = "★" * c.get("stars", 3)
-            print(f"    [{i}] {stars} {c['theme']}")
+            hook      = c.get("hook") or c.get("theme", "")
+            angle     = c.get("angle", "")
+            post_type = c.get("post_type", "")
+            icon      = _icons.get(post_type, "")
+            angle_tag = f" [{angle}]" if angle else ""
+            print(f"    [{i:2}] {icon}{angle_tag} 「{hook}」")
 
     selected = result.get("selected_topic")
     if selected:
-        print(f"\n  【選択テーマ】「{selected['theme']}」")
+        hook = selected.get("hook") or selected.get("theme", "")
+        print(f"\n  【選択Hook】「{hook}」")
 
     print()
 
