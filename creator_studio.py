@@ -2732,11 +2732,37 @@ def generate_phase1_daily() -> dict:
         print("  ✅ Phase 1 完了。")
         if reality:
             print(f"  リアリティ: [{reality['type']}] {reality['content'][:40]}")
-        else:
-            print("  リアリティ: なし（Hookのみで続行できます）")
     else:
         print()
         print("  ✅ Phase 1 完了。Hook候補を生成しました。")
+        print()
+        return {
+            "date": today, "world_ctx": world_ctx,
+            "hook_candidates": candidates, "selected_topic": None,
+            "reality": None, "post": None,
+            "observations": [], "topic_candidates": candidates,
+        }
+
+    # ── ⑤ Phase 2: 投稿生成 ─────────────────────────────────────────────
+    import post_generator as pg
+    vertical_name = getattr(_BRAND, "display_name", "専門家")
+
+    post_type = pg.select_post_type()
+    post = None
+    if post_type:
+        post = pg.generate_post(
+            hook_dict=selected,
+            post_type=post_type,
+            world_ctx=world_ctx,
+            reality=reality,
+            vertical_name=vertical_name,
+        )
+        if post:
+            pg.print_post(post)
+        else:
+            print("  （投稿生成をスキップしました）")
+    else:
+        print("  （Phase 2 スキップ）")
 
     print()
 
@@ -2746,6 +2772,7 @@ def generate_phase1_daily() -> dict:
         "hook_candidates": candidates,
         "selected_topic":  selected,
         "reality":         reality,
+        "post":            post,
         # 後方互換
         "observations":    [reality] if reality else [],
         "topic_candidates": candidates,
