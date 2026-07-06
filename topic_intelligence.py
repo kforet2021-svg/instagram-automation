@@ -365,13 +365,17 @@ def print_topic_candidates(candidates: list) -> None:
 
     for i, c in enumerate(candidates, 1):
         hook      = c.get("hook") or c.get("theme", "")
-        angle     = c.get("angle", "")
-        post_type = c.get("post_type", "共感")
-        icon      = _POST_TYPE_ICON.get(post_type, post_type)
-        reason    = c.get("reason", "")
+        perspective = c.get("perspective", "")
+        angle       = c.get("angle", "")
+        post_type   = c.get("post_type", "共感")
+        icon        = _POST_TYPE_ICON.get(post_type, post_type)
+        reason      = c.get("reason", "")
         print()
-        angle_tag = f"  [{angle}]" if angle else ""
-        print(f"  [{i:2}]  {icon}{angle_tag}")
+        tags = "  ".join(filter(None, [
+            f"[{perspective}]" if perspective else "",
+            f"[{angle}]"       if angle       else "",
+        ]))
+        print(f"  [{i:2}]  {icon}  {tags}")
         print(f"        「{hook}」")
         if reason:
             import textwrap as _tw
