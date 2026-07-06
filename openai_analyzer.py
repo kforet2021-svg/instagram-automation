@@ -939,94 +939,73 @@ def extract_observations_only(qa_pairs: list) -> dict:
 # ── Topic Intelligence（Phase 1: Topic候補生成）────────────────────────────
 
 _TOPIC_CANDIDATES_SYSTEM = (
-    "あなたはCreator Intelligence PlatformのTopic Intelligence Engineです。\n"
-    "専門家が「今日はこれ話したい」と思える具体的なテーマ候補を提案します。\n\n"
-    "【Concrete Topic Rule — 最重要ルール】\n"
-    "  Topicはカテゴリではなく「投稿タイトルレベル」まで具体化する。\n\n"
+    "あなたはCreator Intelligence PlatformのHook Intelligence Engineです。\n"
+    "Instagram・Threadsのトレンド × World Context × ブランド専門領域から\n"
+    "「スクロールが止まるHook文」を10案生成します。\n\n"
+    "【Hook の役割】\n"
+    "  Instagram 1枚目 / Threads 1行目に使える文章。\n"
+    "  Hookを見た瞬間「これ話したい」「これ読みたい」と思えるレベル。\n\n"
+    "【Concrete Hook Rule — 最重要ルール】\n"
+    "  Hookはカテゴリではなく「投稿タイトルレベル」の具体的な一文。\n\n"
     "  NG（カテゴリ・抽象的）:\n"
     "    ✗ 「紫外線対策」\n"
     "    ✗ 「表情筋と夏」\n"
-    "    ✗ 「顔のセルフケア」\n"
-    "    ✗ 「顔の日焼け後のケア」\n\n"
-    "  OK（投稿タイトルレベルの具体性）:\n"
-    "    ○ 「プールの日、首だけ焼けていませんか？」\n"
-    "    ○ 「日焼け止めを塗っているのに乾燥する人へ。」\n"
-    "    ○ 「朝起きた時、顔がかたい人へ。」\n"
+    "    ✗ 「顔のセルフケア」\n\n"
+    "  OK（読んだ瞬間に状況が浮かぶ）:\n"
+    "    ○ 「朝起きると顔がかたい人へ。」\n"
+    "    ○ 「プールの日、首まで塗り直していますか？」\n"
+    "    ○ 「笑いにくいのは年齢だけじゃない。」\n"
     "    ○ 「頬が動かないのは年齢だけが原因ではありません。」\n\n"
-    "  Topicを見た瞬間「これ話したい」と思えるレベルまで具体化する。\n\n"
     "【Customer Language Rule】\n"
-    "  Topicはお客様が実際に口にする言葉で作る。\n"
-    "  Topic作成前に必ず問う: 「お客様はこの悩みを何と言うか？」\n\n"
+    "  Hookはお客様が実際に口にする言葉だけで作る。\n\n"
     "  NG（専門家・雑誌の言葉）:\n"
     "    ✗ 「表情筋」「紫外線対策」「熱中症対策」「顔の水分補給」\n\n"
     "  OK（お客様が検索・会話で使う言葉）:\n"
-    "    ○ 「朝起きると顔がかたい」\n"
-    "    ○ 「笑いにくい」\n"
-    "    ○ 「顔が疲れて見える」\n"
-    "    ○ 「エラが張ってきた気がする」\n"
-    "    ○ 「写真を撮ると左右差が気になる」\n\n"
-    "  専門家が説明したいことではなく、お客様が使う言葉をTopicにする。\n\n"
-    "【優先比率】\n"
-    "  Observation（専門家の現場気づき）: 70%\n"
-    "  ブランド専門領域: 20%\n"
-    "  World Context（季節・社会・地域）: 10%\n"
-    "  Observationから離れたTopicは禁止。\n\n"
+    "    ○ 「朝起きると顔がかたい」「笑いにくい」「顔が疲れて見える」\n"
+    "    ○ 「エラが張ってきた気がする」「写真を撮ると左右差が気になる」\n\n"
+    "【Hook生成の優先順位】\n"
+    "  1位: Instagram・Threadsトレンドで今まさに反応されている言葉・悩み\n"
+    "  2位: World Context（季節・気候・地域）が生む「今だから刺さる」悩み\n"
+    "  3位: 過去Observation Libraryの繰り返し出てくる悩み\n\n"
     "【Brand Filter】\n"
-    "  各Topic提案前に必ず自問する:\n"
-    "  「この投稿は美容雑誌でも作れますか？」\n"
+    "  各Hook提案前に必ず自問する:\n"
+    "  「このHookは美容雑誌でも作れますか？」\n"
     "  → YESなら却下。この専門家だから話せる内容だけ残す。\n\n"
-    "【Reality Check — Hookに勝手な原因・事実を作らない】\n"
-    "  Hook・themeに使える情報は、専門家のObservationに実際に書かれていることだけ。\n\n"
-    "  NG（Observationにない原因を勝手に作る）:\n"
-    "    ✗ 「暑さのせいで顔がむくむ」← Observationに「暑さ」が出ていない場合\n"
-    "    ✗ 「冷房で表情筋が固まる」← Observationに「冷房」が出ていない場合\n\n"
-    "  OK（Observationに根拠がある）:\n"
-    "    ○ 「朝起きると顔がかたい」← 専門家が現場でこの悩みを聞いている\n"
-    "    ○ 「笑いにくい」← 専門家がこの言葉を直接聞いた\n\n"
-    "  Observationにない原因・事実を使う必要がある場合は、stars=2以下にして提案しないこと。\n\n"
+    "【Reality Check】\n"
+    "  Hookに使う悩み・状況は、実際にお客様が言いそうな言葉だけ。\n"
+    "  インプット情報にない原因を勝手に作ってはいけない。\n\n"
     "【禁止】\n"
-    "  ✗ カテゴリ名・抽象的なテーマ（「紫外線対策」「顔のケア」など）\n"
+    "  ✗ カテゴリ名・抽象的なテーマ\n"
     "  ✗ 熱中症対策・夏野菜・旅行・健康ニュース紹介\n"
     "  ✗ 投稿文・台本・キャプションを書く\n"
     "  ✗ 美容雑誌でも作れる内容\n"
-    "  ✗ Observationにない原因・体験を勝手にHookに使う\n"
     "回答は必ずJSON形式で。"
 )
 
 
 def generate_topic_candidates_ai(
     world_ctx: dict,
-    observations: list,
+    observations: list = None,
     vertical_name: str = "専門家",
     region: str = "",
     brand_domain: str = "",
     off_brand_topics: list = None,
+    past_obs_library: str = "",
 ) -> list:
     """
-    World Context × Observation × Brand Domain からTopic候補を生成する（1コール）。
+    Instagram/Threadsトレンド × World Context × ブランド領域 → Hook候補10案（1コール）。
 
-    Brand Filter: 他の健康アカウントでも話せる内容は却下。
-    この専門家だから話せる内容だけを返す。
+    Observationは任意。提供された場合はリアリティ補強として参照する。
+    past_obs_library: 過去のObservationライブラリ（テキスト、任意）
 
-    戻り値: [{"theme": "...", "stars": 5, "why_now": "...", "who": "...", "why_expert": "..."}, ...]
+    戻り値: [{"hook": "...", "theme": "...", "stars": 5, ...}, ...]
     失敗時は空リスト。
     """
     season    = world_ctx.get("season", "")
     hot       = world_ctx.get("hot_tension", "")
-    social    = world_ctx.get("social_trends", "")
-    life      = world_ctx.get("life_trends", "")
-    psych     = world_ctx.get("psychology_trends", "")
+    brand_ctx = world_ctx.get("brand_relevant_context", "") or world_ctx.get("social_trends", "")
     month_ctx = world_ctx.get("month_context", "")
-
-    obs_text = ""
-    if observations:
-        obs_lines = [
-            f"  ・[{o.get('type','気づき')}] {o.get('content', o) if isinstance(o, dict) else o}"
-            for o in observations
-        ]
-        obs_text = "【専門家のObservation（現場から）】\n" + "\n".join(obs_lines) + "\n\n"
-    else:
-        obs_text = "【専門家のObservation】（本日は未入力）\n\n"
+    audience  = world_ctx.get("audience_mood", "")
 
     region_line = f"地域: {region}\n" if region else ""
 
@@ -1038,33 +1017,50 @@ def generate_topic_candidates_ai(
     if off_brand_topics:
         examples = "、".join(off_brand_topics[:5])
         off_brand_line = (
-            f"【Topic Brand Filter — 却下例】\n"
-            f"以下のようなTopicは「他の健康アカウントでも話せる」ため却下:\n"
+            f"【Brand Filter — 却下例】\n"
+            f"以下のようなHookは「他の健康アカウントでも使える」ため却下:\n"
             f"  {examples}\n\n"
         )
+
+    obs_text = ""
+    if observations:
+        obs_lines = [
+            f"  ・[{o.get('type','気づき')}] {o.get('content', o) if isinstance(o, dict) else o}"
+            for o in observations
+        ]
+        obs_text = (
+            "【本日のObservation（リアリティ補強として参照）】\n"
+            + "\n".join(obs_lines) + "\n"
+            "  ※ Hookの根拠にできるが、Observationがなくても生成してよい\n\n"
+        )
+
+    lib_text = ""
+    if past_obs_library:
+        lib_text = f"【過去Observation Library（繰り返し出る悩み）】\n{past_obs_library[:400]}\n\n"
 
     prompt = (
         f"専門家: {vertical_name}\n"
         f"{region_line}"
         f"今日の季節: {season}（{month_ctx}）\n"
         f"今の最大関心事: {hot}\n"
-        f"社会トレンド: {social[:200] if social else '（なし）'}\n"
-        f"生活トレンド: {life[:200] if life else '（なし）'}\n"
-        f"人々の心理: {psych[:200] if psych else '（なし）'}\n\n"
+        f"ブランド関連の環境情報:\n{brand_ctx[:300] if brand_ctx else '（なし）'}\n"
+        f"30〜40代女性の今の気分: {audience[:100] if audience else '（なし）'}\n\n"
         f"{brand_line}"
         f"{off_brand_line}"
+        f"{lib_text}"
         f"{obs_text}"
         "【生成手順】\n"
-        "  Step1. Observationを全て読む（最優先）\n"
-        "  Step2. Observationを起点にTopicを作る（カテゴリではなく投稿タイトルレベル）\n"
-        "  Step3. World Contextで「なぜ今か」を補強する\n"
+        "  Step1. Instagram・Threadsで今まさに反応されている悩みパターンを想定する\n"
+        "         （季節・気候・30〜40代女性の日常から逆算）\n"
+        "  Step2. World Contextで「なぜ今か」を確認する\n"
+        "  Step3. ブランド領域に絞り込む（顔・表情筋・むくみ・たるみ等）\n"
         "  Step4. Brand Filterを通す:\n"
-        "         「この投稿は美容雑誌でも作れますか？」→ YESなら却下\n\n"
-        "この専門家が「今日話したくなる」テーマを5〜10案提案してください。\n\n"
+        "         「このHookは美容雑誌でも作れますか？」→ YESなら却下\n\n"
+        "スクロールが止まるHook文を10案提案してください。\n\n"
         "【評価基準（stars）】\n"
-        "  5: Observation直結 × この専門家にしか言えない × 具体的な投稿タイトルレベル\n"
-        "  4: Observation由来 × 専門家らしく × タイムリー\n"
-        "  3: まあまあ専門家らしいが美容雑誌でも作れるかもしれない\n"
+        "  5: 今この瞬間にInstagram/Threadsで最も反応されそう × 専門家だけが言える\n"
+        "  4: タイムリー × 専門家らしく × 具体的\n"
+        "  3: まあまあ使えるが美容雑誌でも作れるかもしれない\n"
         "  2以下: 提案しない\n\n"
         "各テーマに:\n"
         "  hook      : Instagramの1枚目/Threadsの1行目になる文章（15〜30文字）\n"

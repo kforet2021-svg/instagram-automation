@@ -249,7 +249,7 @@ def collect_observations(
     return observations
 
 
-# ── Topic Candidates 生成 ─────────────────────────────────────────────────────
+# ── Hook候補生成 ─────────────────────────────────────────────────────────────
 
 _SKIP_PHRASES = {"特になし", "なし", "特に無し", "なし。", "ない", ""}
 
@@ -258,93 +258,83 @@ def _is_empty_observation(content: str) -> bool:
     return content.strip() in _SKIP_PHRASES
 
 
-def _run_extra_observation_round(world_ctx: dict, vertical_name: str) -> list:
-    """Observation が不足しているときに追加で1問聞く。"""
-    season = world_ctx.get("season", "")
-    region = world_ctx.get("region", "")
-    loc = f"{region}・{season}" if region and season else (region or season)
-
-    print()
-    print("  ──────────────────────────────────────────────────────────")
-    print("  Observationが必要です。もう少し教えてください。")
-    if loc:
-        print(f"  （{loc}）")
-    print()
-    extra_qs = [
-        "今日のお客様で一番「あ、これ投稿したい」と思った場面は？",
-        "最近、施術中に気づいた変化や特徴はありましたか？",
-        "今日「この伝え方、刺さるな」と思った言葉はありましたか？",
-    ]
-    observations = []
-    for q in extra_qs:
-        print(f"  Q. {q}")
-        try:
-            answer = input("  >   ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-        if not answer or _is_empty_observation(answer):
-            continue
-        obs_type = _classify_observation(answer)
-        observations.append({"type": obs_type, "content": answer})
-        print(f"    → [{obs_type}] として保存しました")
-        break  # 1件取れたら終了
-    print("  ──────────────────────────────────────────────────────────")
-    return observations
-
-
 def generate_topic_candidates(
     world_ctx: dict,
-    observations: list,
+    observations: list = None,
     vertical_name: str = "専門家",
     brand_domain: str = "",
     off_brand_topics: list = None,
+    past_obs_library: str = "",
     skip_if_no_tty: bool = True,
 ) -> list:
     """
-    Observation Gate チェック → Topic候補生成（AI 1コール）。
+    Instagram/Threadsトレンド × World Context → Hook候補10案（AI 1コール）。
 
-    Observationが0件 or「特になし」のみの場合は追加Conversationを実施する。
-    Gate通過後: World Context × Observation × Brand Domain でTopic候補を返す。
+    Observationは任意（リアリティ補強として参照するが、なくても生成する）。
+    past_obs_library: 過去Observationの要約テキスト（任意）。
     """
-    import sys
-
-    # ── Observation Gate ────────────────────────────────────────────────────────
-    valid_obs = [o for o in observations if not _is_empty_observation(o.get("content", ""))]
-
-    if not valid_obs:
-        print()
-        print("  ⚠️  OBSERVATION GATE")
-        print("  Observationが不足しています。Topic生成を保留します。")
-
-        if skip_if_no_tty and not sys.stdin.isatty():
-            print("  （TTYなし — Topic生成をスキップします）")
-            return []
-
-        extra = _run_extra_observation_round(world_ctx, vertical_name)
-        valid_obs = extra
-
-        if not valid_obs:
-            print("  Observationを収集できませんでした。Topic生成をスキップします。")
-            return []
-
-        print(f"  ✅ {len(valid_obs)}件のObservationを収集しました。Topic生成を開始します。")
-    # ── Topic生成 ────────────────────────────────────────────────────────────────
     region = world_ctx.get("region", "")
+    obs = [o for o in (observations or []) if not _is_empty_observation(o.get("content", ""))]
 
     try:
         from openai_analyzer import generate_topic_candidates_ai
         return generate_topic_candidates_ai(
             world_ctx=world_ctx,
-            observations=valid_obs,
+            observations=obs,
             vertical_name=vertical_name,
             region=region,
             brand_domain=brand_domain,
             off_brand_topics=off_brand_topics or [],
+            past_obs_library=past_obs_library,
         )
     except Exception as e:
-        print(f"  ⚠️ Topic候補生成失敗: {e}")
+        print(f"  ⚠️ Hook候補生成失敗: {e}")
         return []
+
+
+# ── Hook選択後のリアリティ追加 ───────────────────────────────────────────────
+
+def ask_hook_reality(
+    selected: dict,
+    skip_if_no_tty: bool = True,
+) -> Optional[dict]:
+    """
+    Hookを選んだ後に「リアリティを加える実例」を任意で聞く。
+
+    Observationの役割: テーマ探しではなく投稿にリアリティを加えること。
+    回答がなくても投稿は作れる（完全任意）。
+
+    Returns:
+        {"content": "...", "source": "...", "type": "..."} | None
+    """
+    if skip_if_no_tty and not sys.stdin.isatty():
+        return None
+
+    hook = selected.get("hook") or selected.get("theme", "")
+    print()
+    print("  ──────────────────────────────────────────────────────────")
+    print("  このHookに関係する最近の出来事や実例があれば教えてください。")
+    print(f"  （「{hook}」）")
+    print()
+    print("  例: お客様の言葉・自分の体験・SNSで見たこと・本で読んだこと")
+    print("  空Enterでスキップ（なくても投稿できます）")
+    print()
+
+    try:
+        answer = input("  >   ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+    if not answer or _is_empty_observation(answer):
+        print("  （スキップ — リアリティなしで続行します）")
+        print("  ──────────────────────────────────────────────────────────")
+        return None
+
+    obs_type = _classify_observation(answer)
+    print(f"    → [{obs_type}] として保存しました")
+    print("  ──────────────────────────────────────────────────────────")
+    return {"type": obs_type, "content": answer, "source": "hook_reality"}
 
 
 # ── 表示 ─────────────────────────────────────────────────────────────────────
@@ -427,12 +417,9 @@ def select_topic_interactive(
 
     if digit is not None and 0 <= digit < len(candidates):
         selected = candidates[digit]
+        hook = selected.get("hook") or selected.get("theme", "")
         print()
-        print(f"  ✅ 選択: 「{selected['theme']}」")
-        if selected.get("reason"):
-            print(f"     理由: {selected['reason']}")
-        print()
-        print("  次: Creator Conversation（3〜5問）を開始します")
+        print(f"  ✅ 選択: 「{hook}」")
         print()
         return selected
 

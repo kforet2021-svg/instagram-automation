@@ -2657,23 +2657,23 @@ def _themes_match(em_theme: str, record_theme: str) -> bool:
 
 def generate_phase1_daily() -> dict:
     """
-    Creator Intelligence Phase 1 — 毎朝のテーマ提案。
+    Creator Intelligence Phase 1 — 毎朝のHook提案。
 
     フロー:
-      ① World Context（地域優先）
-      ② Observation収集（現場の気づき3問）
-      ③ Topic Intelligence: World Context × Observation → 5〜8テーマ候補
-      → STOP（ユーザーがテーマを選択）
+      ① World Context（地域優先・ブランド関連情報のみ）
+      ② Hook Intelligence: Instagram/Threadsトレンド × World Context → Hook 10案
+      ③ ユーザーがHookを選択
+      ④ リアリティ追加（任意）: 選んだHookに関係する最近の出来事や実例
 
-    投稿は生成しない。
-    「今日はこれ話したら面白そう」を提案するのが目的。
+    Observationは毎日必須ではない。投稿にリアリティを加えるために使う（任意）。
 
     Returns:
         {
-            "world_ctx": dict,
-            "observations": list,
-            "topic_candidates": list,
-            "selected_topic": dict | None,
+            "date":             str,
+            "world_ctx":        dict,
+            "hook_candidates":  list,
+            "selected_topic":   dict | None,
+            "reality":          dict | None,  # Hook選択後の任意Observation
         }
     """
     import world_context as wc
@@ -2681,32 +2681,25 @@ def generate_phase1_daily() -> dict:
 
     today = datetime.date.today().isoformat()
 
-    # ── ① World Context: 地域優先トレンドを収集 ──────────────────────────
+    # ── ① World Context ──────────────────────────────────────────────────
     print()
     print("=" * 60)
     print("  Creator Intelligence — Phase 1")
-    print("  今日話したくなるテーマを探します")
+    print("  今日話したくなるHookを探します")
     print("=" * 60)
     print("\n  ① World Context を取得中...")
     world_ctx = wc.get_world_context(today)
     wc.print_world_context(world_ctx)
 
-    # ── ② Observation: 現場の気づきを収集（AIコストゼロ）────────────────
-    print("\n  ② Observation — 最近の気づきを聞かせてください")
-    vertical_name = getattr(_BRAND, "display_name", "専門家")
-    observations = ti.collect_observations(
-        world_ctx=world_ctx,
-        vertical_name=vertical_name,
-    )
-
-    # ── ③ Topic Intelligence: Topic候補を生成 ────────────────────────────
-    # Brand Filter: World Context × Observation × ブランド領域 の交差点のみ通過
-    print("\n  ③ Topic Intelligence — テーマを生成中（Brand Filter 適用）...")
+    # ── ② Hook Intelligence ──────────────────────────────────────────────
+    print("\n  ② Hook Intelligence — Instagram/Threadsトレンド × World Context...")
+    vertical_name    = getattr(_BRAND, "display_name", "専門家")
     brand_domain     = getattr(_BRAND, "brand_domain", "")
     off_brand_topics = getattr(_BRAND, "off_brand_topics", [])
+
     candidates = ti.generate_topic_candidates(
         world_ctx=world_ctx,
-        observations=observations,
+        observations=[],       # Hook生成にObservationは不要
         vertical_name=vertical_name,
         brand_domain=brand_domain,
         off_brand_topics=off_brand_topics,
@@ -2714,41 +2707,36 @@ def generate_phase1_daily() -> dict:
 
     ti.print_topic_candidates(candidates)
 
-    # ── ユーザー選択（対話環境のみ）─────────────────────────────────────
+    # ── ③ ユーザーがHookを選択 ──────────────────────────────────────────
     selected = ti.select_topic_interactive(candidates)
 
-    # ── Creator Conversation（Topic選択後に開始）────────────────────────
-    conversation = None
+    # ── ④ リアリティ追加（任意）─────────────────────────────────────────
+    reality = None
     if selected:
-        import creator_conversation as cc
-        conversation = cc.run_creator_conversation(
-            selected_topic=selected,
-            world_context=world_ctx,
-            today=today,
-            vertical_name=vertical_name,
-        )
+        reality = ti.ask_hook_reality(selected)
 
     if selected:
         print()
         print("  ✅ Phase 1 完了。")
-        if conversation:
-            print(f"  Conversation: {len(conversation.get('observations', []))}件のObservation収集")
+        if reality:
+            print(f"  リアリティ: [{reality['type']}] {reality['content'][:40]}")
         else:
-            print("  Conversation: スキップ（次回実行時に選択してください）")
+            print("  リアリティ: なし（Hookのみで続行できます）")
     else:
         print()
-        print("  ✅ Phase 1 完了。テーマ候補を生成しました。")
-        print("  テーマを選ぶと Conversation を開始できます。")
+        print("  ✅ Phase 1 完了。Hook候補を生成しました。")
 
     print()
 
     return {
-        "date":             today,
-        "world_ctx":        world_ctx,
-        "observations":     observations,
+        "date":            today,
+        "world_ctx":       world_ctx,
+        "hook_candidates": candidates,
+        "selected_topic":  selected,
+        "reality":         reality,
+        # 後方互換
+        "observations":    [reality] if reality else [],
         "topic_candidates": candidates,
-        "selected_topic":   selected,
-        "conversation":     conversation,
     }
 
 
