@@ -53,14 +53,61 @@ _TYPE_LABELS = list(OBSERVATION_TYPES.keys())  # 選択番号の順番
 _TYPE_DISPLAY = {k: f"{k}（{v.split('（')[0].rstrip('（')}）" for k, v in OBSERVATION_TYPES.items()}
 
 
-# ── Observation 収集（固定3問 + 分類）────────────────────────────────────────
+# ── Observation ソース定義 ────────────────────────────────────────────────────
 
-_PHASE1_QUESTIONS = [
-    "今日、印象に残ったお客様の悩みや言葉は？",
-    "最近「それ違いますよ」と伝えたことは？",
-    "今日なら何をセルフケアとして伝えますか？",
+# (label, question)
+OBSERVATION_SOURCES = [
+    ("お客様との会話",   "今日のお客様で印象に残った悩みや言葉は？"),
+    ("自分自身の気付き", "最近「これ、投稿したい」と思った自分の気付きは？"),
+    ("SNSコメント",      "最近SNSのコメントで気になった言葉や反応は？"),
+    ("DM",               "最近のDMで印象に残ったメッセージは？"),
+    ("家族との会話",     "家族との会話で「これ、みんな知らないかも」と思ったことは？"),
+    ("街で見たこと",     "最近、街や日常で気になった顔・表情・姿勢は？"),
+    ("ニュース",         "最近のニュースで「顔・体・美容」に関係するものは？"),
+    ("Instagram",        "最近Instagramで見て「これ投稿したい」と思った投稿や反応は？"),
+    ("Threads",          "最近Threadsで気になった投稿や会話は？"),
+    ("本・雑誌",         "最近読んで「これ面白い」と思ったことは？"),
+    ("YouTube",          "最近YouTubeで見て気になった内容は？"),
+    ("セミナー・勉強会", "最近のセミナーや勉強会で印象に残ったことは？"),
+    ("失敗談",           "最近「あ、これ失敗した」と思ったことは？（顔・ケア・伝え方）"),
+    ("成功事例",         "最近「これ効いた！」と思ったこと（施術・伝え方・投稿）は？"),
 ]
 
+_SOURCE_LABELS = [s[0] for s in OBSERVATION_SOURCES]
+
+
+def _select_source() -> tuple[str, str]:
+    """
+    「今日はどこからネタを探しますか？」を聞いてソースを選ぶ。
+
+    Returns: (source_label, question_text)
+    """
+    print()
+    print("  今日はどこからネタを探しますか？（番号で選択）")
+    print()
+    for i, (label, _) in enumerate(OBSERVATION_SOURCES, 1):
+        print(f"    {i:2}. {label}")
+    print()
+
+    try:
+        choice = input("  > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return OBSERVATION_SOURCES[0]  # デフォルト: お客様
+
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(OBSERVATION_SOURCES):
+            return OBSERVATION_SOURCES[idx]
+
+    # テキスト部分一致
+    for src in OBSERVATION_SOURCES:
+        if choice in src[0]:
+            return src
+
+    return OBSERVATION_SOURCES[0]
+
+
+# ── Observation 収集 ──────────────────────────────────────────────────────────
 
 def _classify_observation(content: str) -> str:
     """
@@ -96,19 +143,35 @@ def _classify_observation(content: str) -> str:
     return "Observation"
 
 
+def _ask_one_observation(question: str, source_label: str, idx: int) -> Optional[dict]:
+    """1問聞いて Observation dict を返す。スキップ or 空なら None。"""
+    print()
+    wrapped = textwrap.fill(question, width=52, subsequent_indent="      ")
+    print(f"  Q{idx}. {wrapped}")
+    try:
+        answer = input("  >   ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not answer or _is_empty_observation(answer):
+        return None
+    obs_type = _classify_observation(answer)
+    print(f"    → [{obs_type}] として保存しました")
+    return {"type": obs_type, "content": answer, "source": source_label}
+
+
 def collect_observations(
     world_ctx: dict,
     vertical_name: str = "専門家",
     skip_if_no_tty: bool = True,
 ) -> list:
     """
-    専門家から「今日の気づき」を収集し、7分類で分類する（AIコストゼロ）。
+    「今日はどこからネタを探しますか？」→ ソース選択 → Observation収集。
 
-    3問を聞き、各回答を Pain/Misconception/Observation/Result/Method/Product/Trend に分類。
-    分類不明の場合はユーザーが選択。
+    Observationが取れなければ別ソースに切り替えを促す。
+    各Observationを 7分類（Pain/Misconception/…）に分類する（AIコストゼロ）。
 
     Returns:
-        [{"type": "Pain|Misconception|...", "content": "..."}, ...]
+        [{"type": "...", "content": "...", "source": "..."}, ...]
     """
     if skip_if_no_tty and not sys.stdin.isatty():
         return []
@@ -124,39 +187,63 @@ def collect_observations(
         loc = f"{region}・{season}" if region and season else (region or season)
         print(f"  {loc}")
     print()
-    print("  今日の気づきを教えてください。")
     print("  空Enterでスキップ")
     print("-" * 60)
 
     observations = []
+    tried_sources: set[str] = set()
 
-    for i, question in enumerate(_PHASE1_QUESTIONS):
-        print()
-        wrapped = textwrap.fill(question, width=52, subsequent_indent="      ")
-        print(f"  Q{i+1}. {wrapped}")
-        try:
-            answer = input("  >   ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
+    while True:
+        # ── ソース選択 ──
+        source_label, main_question = _select_source()
+        tried_sources.add(source_label)
+        print(f"\n  ✏️  ソース: {source_label}")
+        print("-" * 60)
+
+        # ── メイン質問（ソース固有） ──
+        obs = _ask_one_observation(main_question, source_label, 1)
+        if obs:
+            observations.append(obs)
+
+        # ── 追加質問2問（汎用：なぜ気になった・どう使える） ──
+        if obs:
+            follow_ups = [
+                "それを見たとき「なぜ？」と思ったことは？（空Enterでスキップ）",
+                "これをお客様に伝えるとしたら、どんな言葉で伝えますか？（空Enterでスキップ）",
+            ]
+            for j, fq in enumerate(follow_ups, 2):
+                fo = _ask_one_observation(fq, source_label, j)
+                if fo:
+                    observations.append(fo)
+
+        # ── 収集できたか確認 ──
+        if observations:
             break
-        if not answer:
-            continue
 
-        # 分類
-        obs_type = _classify_observation(answer)
-        observations.append({
-            "type":    obs_type,
-            "content": answer,
-        })
-        print(f"    → [{obs_type}] として保存しました")
+        # ── 取れなかった → 別ソースへ誘導 ──
+        print()
+        print("  （このソースからはObservationを取得できませんでした）")
+        remaining = [s[0] for s in OBSERVATION_SOURCES if s[0] not in tried_sources]
+        if not remaining:
+            print("  すべてのソースを試しました。Observationなしで続行します。")
+            break
+        print("  別のソースに変更しますか？（Enter で続ける / n で終了）")
+        try:
+            cont = input("  > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if cont == "n":
+            break
+        # ループして再度ソース選択
 
     print()
     if observations:
         print(f"  ✅ {len(observations)}件のObservationを収集しました")
         for o in observations:
-            print(f"    [{o['type']}] {o['content'][:40]}")
+            src = o.get("source", "")
+            print(f"    [{o['type']}|{src}] {o['content'][:40]}")
     else:
-        print("  （Observationなし — World Contextのみでテーマを生成します）")
+        print("  （Observationなし）")
     print("=" * 60)
 
     return observations
