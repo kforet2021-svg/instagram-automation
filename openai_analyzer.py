@@ -510,8 +510,13 @@ def extract_interview_insights(qa_pairs: list) -> dict:
 
 _WORLD_CONTEXT_SYSTEM = (
     "あなたはCreator Intelligence PlatformのWorld Context Engineです。\n"
-    "SNSトレンドだけでなく、社会・生活・人々の心理を総合的に把握します。\n"
-    "専門家が「今このタイミングで何を発信すべきか」の土台を作ります。\n"
+    "顔専門エステサロン（小顔矯正・顔筋トレーニング・たるみ改善）の専門家が\n"
+    "「今このタイミングで何を発信すべきか」を判断するための環境情報を提供します。\n\n"
+    "【World Context Minimal Rule — 最重要】\n"
+    "  ブランド（顔・表情筋・顔のむくみ・たるみ・睡眠・姿勢）に\n"
+    "  影響する情報だけを3〜5項目に絞る。\n\n"
+    "  含める例: 紫外線・湿度・冷房・汗・写真を撮る機会・睡眠・暑さによる体の変化\n"
+    "  除外する例: 旅行・AI・観光・経済・スポーツ・映画・政治・一般的な健康ニュース\n\n"
     "回答は必ずJSON形式で。"
 )
 
@@ -544,21 +549,19 @@ def get_world_context_trends(today: str, season_context: dict, region: str = "")
         f"季節文脈: {month_ctx}\n"
         f"紫外線: {uv} / 花粉: {pollen}\n"
         f"イベント・連休: {holiday}\n\n"
-        "この日付・季節・地域を踏まえて、以下を推測・合成してください。\n"
-        "※地域特有の気候・文化・気温・湿度・生活スタイルがある場合は必ず反映する。\n\n"
-        "【social_trends】社会で今起きていること（3〜5点、箇条書き）\n"
-        "  ニュース・AI動向・経済・制度変更・スポーツ・映画・ドラマ\n"
-        "  Google/YouTube検索トレンド・Pinterest・Yahoo知恵袋で話題のこと\n\n"
-        "【life_trends】人々の生活がどう変わっているか（3〜5点、箇条書き）\n"
-        "  消費動向・SNS（Instagram/Threads/TikTok）・旅行・口コミ傾向\n"
-        "  今月の気温・湿度・紫外線が生活習慣に与えている影響\n\n"
-        "【psychology_trends】今人々が感じていること（3〜5点、箇条書き）\n"
-        "  不安・期待・疲れ・欲求・関心の変化\n"
-        "  生活者心理: 今月の「したいこと・やめたいこと・気になること」\n\n"
-        "【hot_tension】今この瞬間の最大関心事・緊張感（1文、30文字以内）\n\n"
+        "この日付・季節・地域を踏まえて、以下を提供してください。\n"
+        "※地域特有の気候・気温・湿度・生活スタイルがある場合は必ず反映する。\n\n"
+        "【対象ブランド】顔専門エステサロン（小顔矯正・顔筋トレーニング・たるみ改善）\n\n"
+        "【brand_relevant_context】\n"
+        "  このブランドに影響する環境・生活情報だけ、3〜5項目、箇条書き。\n"
+        "  含める: 紫外線・湿度・冷房・汗・写真機会・睡眠・姿勢・食いしばり・\n"
+        "          顔のむくみ・暑さによる体の変化・表情グセに影響する環境\n"
+        "  除外: 旅行・AI・観光・経済・スポーツ・映画・政治・一般的な健康ニュース\n\n"
+        "【hot_tension】今この瞬間の最大関心事・緊張感（1文、30文字以内）\n"
+        "  ブランドに関係する文脈で。\n\n"
         "【audience_mood】30〜40代女性の今の気分・心理（1〜2文）\n"
-        "  ※美容・健康・セルフケアに関心がある層を想定\n\n"
-        'JSON: {"social_trends":"...","life_trends":"...","psychology_trends":"...","hot_tension":"...","audience_mood":"..."}'
+        "  美容・セルフケアに関心がある層を想定。\n\n"
+        'JSON: {"brand_relevant_context":"...","hot_tension":"...","audience_mood":"..."}'
     )
 
     try:
@@ -566,16 +569,19 @@ def get_world_context_trends(today: str, season_context: dict, region: str = "")
                            label="world context: トレンド合成")
         import json as _json
         data = _json.loads(raw)
+        ctx_text = str(data.get("brand_relevant_context", "")).strip()
         return {
-            "social_trends":     str(data.get("social_trends",     "")).strip(),
-            "life_trends":       str(data.get("life_trends",       "")).strip(),
-            "psychology_trends": str(data.get("psychology_trends", "")).strip(),
-            "hot_tension":       str(data.get("hot_tension",       "")).strip(),
-            "audience_mood":     str(data.get("audience_mood",     "")).strip(),
+            "brand_relevant_context": ctx_text,
+            "social_trends":          ctx_text,   # 後方互換
+            "life_trends":            "",
+            "psychology_trends":      "",
+            "hot_tension":            str(data.get("hot_tension",   "")).strip(),
+            "audience_mood":          str(data.get("audience_mood", "")).strip(),
         }
     except Exception as e:
         print(f"  ⚠️ World Context AI取得失敗: {e}")
         return {
+            "brand_relevant_context": "",
             "social_trends": "", "life_trends": "",
             "psychology_trends": "", "hot_tension": "", "audience_mood": "",
         }
@@ -969,11 +975,21 @@ _TOPIC_CANDIDATES_SYSTEM = (
     "  各Topic提案前に必ず自問する:\n"
     "  「この投稿は美容雑誌でも作れますか？」\n"
     "  → YESなら却下。この専門家だから話せる内容だけ残す。\n\n"
+    "【Reality Check — Hookに勝手な原因・事実を作らない】\n"
+    "  Hook・themeに使える情報は、専門家のObservationに実際に書かれていることだけ。\n\n"
+    "  NG（Observationにない原因を勝手に作る）:\n"
+    "    ✗ 「暑さのせいで顔がむくむ」← Observationに「暑さ」が出ていない場合\n"
+    "    ✗ 「冷房で表情筋が固まる」← Observationに「冷房」が出ていない場合\n\n"
+    "  OK（Observationに根拠がある）:\n"
+    "    ○ 「朝起きると顔がかたい」← 専門家が現場でこの悩みを聞いている\n"
+    "    ○ 「笑いにくい」← 専門家がこの言葉を直接聞いた\n\n"
+    "  Observationにない原因・事実を使う必要がある場合は、stars=2以下にして提案しないこと。\n\n"
     "【禁止】\n"
     "  ✗ カテゴリ名・抽象的なテーマ（「紫外線対策」「顔のケア」など）\n"
     "  ✗ 熱中症対策・夏野菜・旅行・健康ニュース紹介\n"
     "  ✗ 投稿文・台本・キャプションを書く\n"
     "  ✗ 美容雑誌でも作れる内容\n"
+    "  ✗ Observationにない原因・体験を勝手にHookに使う\n"
     "回答は必ずJSON形式で。"
 )
 

@@ -190,34 +190,26 @@ def print_world_context(ctx: dict) -> None:
     print("  ① WORLD CONTEXT")
     print(THICK)
 
-    print(f"\n  【季節・環境】")
-    print(f"    季節      : {ctx.get('season', '')}  （{ctx.get('month_context', '')}）")
-    print(f"    紫外線    : {ctx.get('uv_level', '')}")
-    print(f"    花粉      : {ctx.get('pollen_level', '')}")
-    if ctx.get("holiday_context"):
-        print(f"    イベント  : {ctx.get('holiday_context', '')}")
+    season = ctx.get('season', '')
+    month_ctx = ctx.get('month_context', '')
+    region = ctx.get('region', '')
+    loc = f"{region}  " if region else ""
+    print(f"\n  {loc}{season}（{month_ctx}）")
 
-    if ctx.get("social_trends"):
-        print(f"\n  【社会トレンド】")
-        for line in ctx["social_trends"].splitlines():
-            if line.strip():
-                print(f"    {line.strip()}")
-
-    if ctx.get("life_trends"):
-        print(f"\n  【生活トレンド】")
-        for line in ctx["life_trends"].splitlines():
-            if line.strip():
-                print(f"    {line.strip()}")
-
-    if ctx.get("psychology_trends"):
-        print(f"\n  【心理トレンド — 今人々が感じていること】")
-        for line in ctx["psychology_trends"].splitlines():
-            if line.strip():
-                print(f"    {line.strip()}")
+    # ブランド関連情報だけ表示（3〜5項目）
+    brand_ctx = ctx.get("brand_relevant_context", "") or ctx.get("social_trends", "")
+    if brand_ctx:
+        print()
+        count = 0
+        for line in brand_ctx.splitlines():
+            line = line.strip().lstrip("・-・•").strip()
+            if line and count < 5:
+                print(f"  ・{line}")
+                count += 1
 
     if ctx.get("hot_tension"):
-        print(f"\n  【今の最大関心事】")
-        print(f"    {ctx['hot_tension']}")
+        print()
+        print(f"  → {ctx['hot_tension']}")
 
     print()
 
