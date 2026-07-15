@@ -2036,3 +2036,51 @@ def seed_thought_library(entries: list) -> None:
         print(f"[API END] Google Sheets thought_library シード投入完了")
     except Exception as e:
         print(f"[API TIMEOUT] thought_library シード投入失敗: {e}")
+
+
+# ── thumbnail_analysis シート ─────────────────────────────────────────────────
+
+SHEET_THUMBNAIL_ANALYSIS = "thumbnail_analysis"
+
+THUMBNAIL_ANALYSIS_HEADERS = [
+    "analyzed_at", "post_url", "account_name", "posted_at",
+    "views", "likes", "comments", "followers", "view_follower_ratio",
+    "thumbnail_image_url", "caption_head",
+    "thumbnail_text", "main_text", "sub_text", "text_length", "text_lines",
+    "emphasized_words", "text_position", "text_size", "font_impression",
+    "background_color", "text_color", "accent_color", "color_count",
+    "person_present", "face_size", "face_direction", "facial_expression",
+    "pose", "pointing", "decoration", "before_after", "whitespace",
+    "self_explanatory", "thumbnail_type", "psychological_trigger",
+    "scroll_stop_reason", "curiosity_reason",
+    "scroll_stop_analysis", "first_gaze", "strongest_word", "reader_emotion",
+    "content_match", "applicable_points", "caution_points",
+    "core_hari_thumbnail_idea", "confidence", "analysis_notes",
+]
+
+
+def save_thumbnail_analysis(analyses: list) -> None:
+    """
+    thumbnail_analysis シートに分析結果をバッチ保存する。
+    同一URLの重複は呼び出し前にフィルタ済みを想定。
+
+    【2026-07-15(1回目): 新規追加。thumbnail_analyzer.py から呼ばれる。】
+    """
+    if not analyses:
+        print("[sheets] thumbnail_analysis: 保存対象なし")
+        return
+
+    worksheet = _get_or_create_worksheet(
+        SHEET_THUMBNAIL_ANALYSIS, THUMBNAIL_ANALYSIS_HEADERS
+    )
+    rows = []
+    for a in analyses:
+        row = [str(a.get(h, "")) for h in THUMBNAIL_ANALYSIS_HEADERS]
+        rows.append(row)
+
+    print(f"[API START] Google Sheets thumbnail_analysis ({len(rows)}件)")
+    try:
+        worksheet.append_rows(rows, value_input_option="USER_ENTERED")
+        print(f"[API END] Google Sheets thumbnail_analysis 保存完了")
+    except Exception as e:
+        print(f"[API TIMEOUT] thumbnail_analysis 保存失敗: {e}")

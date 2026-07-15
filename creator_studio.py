@@ -28,6 +28,7 @@ creator_studio.py
 """
 
 import datetime
+import sys
 from typing import Optional
 
 import sheets_writer
@@ -2727,44 +2728,27 @@ def generate_phase1_daily() -> dict:
         if saved:
             print(f"  Hook Library に保存しました: 「{selected.get('hook', '')[:30]}」")
 
-    if selected:
-        print()
-        print("  ✅ Phase 1 完了。")
-        if reality:
-            print(f"  リアリティ: [{reality['type']}] {reality['content'][:40]}")
-    else:
+    if not selected:
         print()
         print("  ✅ Phase 1 完了。Hook候補を生成しました。")
         print()
         return {
             "date": today, "world_ctx": world_ctx,
             "hook_candidates": candidates, "selected_topic": None,
-            "reality": None, "post": None,
+            "reality": None, "post_type": None,
             "observations": [], "topic_candidates": candidates,
         }
 
-    # ── ⑤ Phase 2: 投稿生成 ─────────────────────────────────────────────
-    import post_generator as pg
-    vertical_name = getattr(_BRAND, "display_name", "専門家")
+    # ── ⑤ 投稿目的を自動提案→確認 ──────────────────────────────────────
+    post_type = _suggest_and_confirm_post_type(selected)
 
-    post_type = pg.select_post_type()
-    post = None
-    if post_type:
-        post = pg.generate_post(
-            hook_dict=selected,
-            post_type=post_type,
-            world_ctx=world_ctx,
-            reality=reality,
-            vertical_name=vertical_name,
-        )
-        if post:
-            pg.print_post(post)
-        else:
-            print("  （投稿生成をスキップしました）")
-    else:
-        print("  （Phase 2 スキップ）")
-
-    print()
+    # ── ⑥ ChatGPT渡し用Markdownを出力 ──────────────────────────────────
+    _print_chatgpt_handoff(
+        selected=selected,
+        post_type=post_type,
+        reality=reality,
+        world_ctx=world_ctx,
+    )
 
     return {
         "date":            today,
@@ -2772,11 +2756,387 @@ def generate_phase1_daily() -> dict:
         "hook_candidates": candidates,
         "selected_topic":  selected,
         "reality":         reality,
-        "post":            post,
-        # 後方互換
+        "post_type":       post_type,
         "observations":    [reality] if reality else [],
         "topic_candidates": candidates,
     }
+
+
+
+_POST_TYPES = ["保存", "共感", "信頼", "行動", "予約"]
+_POST_TYPE_DESC = {
+    "保存": "役立つ情報・セルフケア手順（保存して何度も見返せる）",
+    "共感": "「わかる」「これ私だ」と感じる悩み・あるある",
+    "信頼": "専門家だから見える事実・現場の観察・CORE HARI独自の視点",
+    "行動": "今すぐやってみたくなるセルフケア・チェック",
+    "予約": "信頼の積み重ねから自然に予約を促す（押しつけなし）",
+}
+
+# ── 固定テキスト ──────────────────────────────────────────────────────────────
+
+_CORE_HARI_MUST = (
+    "・顔だけが原因ではない\n"
+    "・姿勢・呼吸・舌・首・頭皮まで見る\n"
+    "・根本原因を考える\n"
+    "・セルフケアは継続が大切"
+)
+
+_NG_LIST = (
+    "・医学的断定は禁止\n"
+    "・エビデンスのない表現は禁止\n"
+    "・一般論だけで終わらせない\n"
+    "・マッサージだけを勧めない\n"
+    "・専門家視点を必ず入れる"
+)
+
+_BRAND_TONE = (
+    "・やさしい\n"
+    "・専門的\n"
+    "・押し付けない\n"
+    "・保存したくなる\n"
+    "・読者が「知らなかった」と思える内容"
+)
+
+
+
+_POST_TYPE_RULE: dict[str, list[str]] = {
+    # angle キーワード → おすすめ投稿目的
+    "信頼":    ["専門家視点", "先にして", "比較", "勘違い"],
+    "保存":    ["チェック", "ランキング", "共通点"],
+    "共感":    ["〜な人へ", "NG行動"],
+    "行動":    ["NG行動", "チェック"],
+    "予約":    [],
+}
+
+def _suggest_post_type(selected: dict) -> str:
+    """HookのAI提案 post_type を第1候補、angle推定を第2候補として返す。"""
+    # AIがすでに post_type を返している場合はそれを使う
+    ai_type = selected.get("post_type", "")
+    if ai_type and ai_type in _POST_TYPES:
+        return ai_type
+    # angle からルールベースで推定
+    angle = selected.get("angle", "")
+    for pt, keywords in _POST_TYPE_RULE.items():
+        if any(kw in angle for kw in keywords):
+            return pt
+    return "信頼"  # デフォルト
+
+
+def _suggest_and_confirm_post_type(selected: dict) -> Optional[str]:
+    """
+    投稿目的をHookから自動提案し、ユーザーに確認する。
+
+    Enter → おすすめを採用
+    番号入力 → 変更
+    """
+    if not sys.stdin.isatty():
+        return _suggest_post_type(selected)
+
+    recommended = _suggest_post_type(selected)
+    others = [pt for pt in _POST_TYPES if pt != recommended]
+
+    print()
+    print("─" * 60)
+    print("  【投稿目的】")
+    print(f"  ◎ {recommended}  （おすすめ）")
+    for pt in others:
+        print(f"  ○ {pt}")
+    print()
+    print(f"  Enter → 「{recommended}」を採用 / 番号で変更")
+    all_types = [recommended] + others
+    for i, pt in enumerate(all_types, 1):
+        print(f"    [{i}] {pt}")
+    print("─" * 60)
+    try:
+        choice = input("  > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return recommended
+    if not choice:
+        return recommended
+    if choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(all_types):
+            return all_types[idx]
+    for pt in _POST_TYPES:
+        if choice == pt:
+            return pt
+    return recommended
+
+
+# Topic一致度スコアリング用キーワードマップ（優先順位順）
+_TOPIC_KEYWORD_TIERS: list[tuple[int, list[str]]] = [
+    # (スコア, キーワードリスト)
+    (100, ["表情筋", "顔筋", "フェイシャルマッスル"]),
+    (80,  ["小顔", "フェイスライン", "輪郭", "顎ライン"]),
+    (60,  ["むくみ", "顔むくみ", "浮腫", "ぱんぱん"]),
+    (40,  ["左右差", "非対称", "顔の歪み", "ゆがみ"]),
+    (20,  ["美容整体", "整顔", "骨格矯正", "小顔矯正"]),
+    (10,  ["美容", "スキンケア", "肌", "ケア"]),
+]
+
+# CORE HARI 視点キーワードとその同義語
+_PERSPECTIVE_SYNONYMS: dict[str, list[str]] = {
+    "咬筋":   ["咬筋", "エラ", "食いしばり", "かみしめ"],
+    "噛み癖": ["噛み癖", "噛む", "片噛み", "偏咀嚼"],
+    "舌":     ["舌", "舌の位置", "舌骨", "口呼吸"],
+    "姿勢":   ["姿勢", "猫背", "前傾", "反り腰"],
+    "首":     ["首", "頸", "ストレートネック", "スマホ首"],
+    "デコルテ": ["デコルテ", "鎖骨", "胸元"],
+    "呼吸":   ["呼吸", "腹式", "鼻呼吸"],
+    "表情グセ": ["表情", "表情グセ", "癖", "グセ"],
+    "左右差": ["左右差", "非対称", "歪み"],
+    "目元":   ["目元", "目", "眼輪筋", "まぶた"],
+    "頭皮":   ["頭皮", "頭", "側頭筋"],
+    "横向き寝": ["横向き", "うつ伏せ", "寝方"],
+    "交感神経": ["交感神経", "自律神経", "ストレス"],
+    "副交感神経": ["副交感神経", "リラックス", "自律神経"],
+}
+
+
+def _topic_relevance_score(caption: str, perspective: str, angle: str) -> int:
+    """
+    キャプション全文に対して Topic一致度スコアを返す。
+
+    優先順位:
+      ① perspective の同義語キーワード（最優先・200点）
+      ② _TOPIC_KEYWORD_TIERS（100〜10点）
+      ③ angle キーワード（+5点ボーナス）
+    """
+    score = 0
+
+    # ① perspective 同義語マッチ
+    synonyms = _PERSPECTIVE_SYNONYMS.get(perspective, [perspective] if perspective else [])
+    for kw in synonyms:
+        if kw and kw in caption:
+            score += 200
+            break  # 1つでも一致すれば最高点
+
+    # ② ジャンル階層マッチ
+    for tier_score, keywords in _TOPIC_KEYWORD_TIERS:
+        for kw in keywords:
+            if kw in caption:
+                score += tier_score
+                break  # 同ティアは1回だけ
+
+    # ③ angle ボーナス
+    if angle and angle in caption:
+        score += 5
+
+    return score
+
+
+def _get_reference_instagrams(perspective: str = "", angle: str = "", top_n: int = 5) -> list[dict]:
+    """
+    reels シートから Topic一致度スコアの高い投稿を top_n 件返す。
+
+    優先順位: perspective同義語 > 表情筋 > 小顔 > 顔むくみ > 左右差 > 美容整体 > 美容
+    一致度が同じ場合はいいね数で決定。
+    取得失敗時のみ空リストを返す。
+    """
+    try:
+        from sheets_writer import _get_or_create_worksheet
+        ws = _get_or_create_worksheet("reels", [])
+        all_rows = ws.get_all_values()
+        if len(all_rows) < 2:
+            return []
+
+        headers = all_rows[0]
+
+        def _col(name: str) -> int:
+            try:
+                return headers.index(name)
+            except ValueError:
+                return -1
+
+        url_i   = _col("投稿URL")
+        plays_i = _col("再生数")
+        likes_i = _col("いいね数")
+        saves_i = _col("保存数")
+        cap_i   = _col("キャプション全文")
+
+        if url_i < 0 or cap_i < 0:
+            return []
+
+        def _int(row: list, idx: int) -> int:
+            if idx < 0 or idx >= len(row):
+                return 0
+            try:
+                return int(float(row[idx])) if row[idx] else 0
+            except (ValueError, TypeError):
+                return 0
+
+        # 各行にスコアを付ける
+        scored = []
+        for row in all_rows[1:]:
+            cap = row[cap_i] if cap_i < len(row) else ""
+            rel = _topic_relevance_score(cap, perspective, angle)
+            likes = _int(row, likes_i)
+            scored.append((rel, likes, row))
+
+        # Topic一致度 > 0 の件数を確認
+        matched_count = sum(1 for rel, _, _ in scored if rel > 0)
+
+        if matched_count >= 3:
+            # 一致件数が3件以上 → Topic一致度最優先、同スコア内のみいいね数
+            scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        else:
+            # 一致件数が少ない → いいね数でフォールバック
+            scored.sort(key=lambda x: (x[1],), reverse=True)
+
+        result = []
+        seen_urls: set[str] = set()
+        for rel, likes, row in scored:
+            url = row[url_i] if url_i < len(row) else ""
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            caption_raw = row[cap_i] if cap_i < len(row) else ""
+            hook_line = "\n".join(caption_raw.strip().splitlines()[:2])[:80]
+            result.append({
+                "url":       url,
+                "plays":     _int(row, plays_i),
+                "likes":     _int(row, likes_i),
+                "saves":     _int(row, saves_i),
+                "hook":      hook_line,
+                "rel_score": rel,
+            })
+            if len(result) >= top_n:
+                break
+
+        return result
+
+    except Exception as e:
+        print(f"  ⚠️ 参考Instagram取得エラー: {e}")
+        return []
+
+
+def _print_chatgpt_handoff(
+    selected: dict,
+    post_type: Optional[str],
+    reality: Optional[dict],
+    world_ctx: dict,
+) -> None:
+    """ChatGPTへ渡すためのテンプレートをMarkdownで出力する。投稿本文は生成しない。"""
+    hook        = selected.get("hook") or selected.get("theme", "")
+    perspective = selected.get("perspective", "")
+    angle       = selected.get("angle", "")
+
+    reality_text = "なし"
+    if reality:
+        rtype    = reality.get("type", "")
+        rcontent = reality.get("content", "")
+        if rcontent:
+            reality_text = f"[{rtype}] {rcontent}"
+
+    brand_ctx = (
+        world_ctx.get("brand_relevant_context", "")
+        or world_ctx.get("social_trends", "")
+    )
+    if brand_ctx:
+        lines = [l.strip() for l in brand_ctx.splitlines() if l.strip()]
+        brand_ctx_fmt = "\n".join(f"・{l.lstrip('・')}" for l in lines)
+    else:
+        brand_ctx_fmt = "なし"
+
+    topic         = f"{perspective} × {angle}" if perspective or angle else "（未設定）"
+    post_type_str = post_type or "（未選択）"
+
+    # Expert Angle — ユーザー選択（AI不使用）
+    import expert_angle as ea
+    expert_angles = ea.select_expert_angles(perspective=perspective)
+
+    # 参考Instagram — reels シートからTopic関連投稿を自動抽出
+    refs = _get_reference_instagrams(perspective=perspective, angle=angle, top_n=5)
+
+    SEP = "=" * 60
+    print()
+    print(SEP)
+    print("  ChatGPT 渡し用 — コピーしてそのまま貼り付けてください")
+    print(SEP)
+    print()
+    print("# CORE HARI 投稿情報")
+    print()
+    print("【Hook】")
+    print(hook)
+    print()
+    print("【投稿形式】")
+    print("Instagramカルーセル（ChatGPT側でThreads / X / リールへ展開）")
+    print()
+    print("【投稿目的】")
+    print(post_type_str)
+    print()
+    print("【Topic】")
+    print(topic)
+    print()
+    print("【Reality】")
+    print(reality_text)
+    print()
+    print("【World Context】")
+    print(brand_ctx_fmt)
+    print()
+    print("【Expert Angle】")
+    if expert_angles:
+        for item in expert_angles:
+            print(f"・{item}")
+    else:
+        print("（未選択）")
+    print()
+    print("【参考Instagram】")
+    if refs:
+        for i, ref in enumerate(refs, 1):
+            print(f"  ─ 参考{i}")
+            print(f"  ・URL:    {ref['url']}")
+            if ref.get("hook"):
+                print(f"  ・Hook:   {ref['hook']}")
+            stats = []
+            if ref.get("likes"):  stats.append(f"いいね {ref['likes']}")
+            if ref.get("saves"):  stats.append(f"保存 {ref['saves']}")
+            if ref.get("plays"):  stats.append(f"再生 {ref['plays']}")
+            if stats:
+                print(f"  ・数値:   {' / '.join(stats)}")
+            print()
+    else:
+        print("（取得なし）")
+    print()
+    print("【CORE HARIで必ず伝えたいこと】")
+    print(_CORE_HARI_MUST)
+    print()
+    print("【NG】")
+    print(_NG_LIST)
+    print()
+    print("【ブランドトーン】")
+    print(_BRAND_TONE)
+    print()
+    print(SEP)
+    print()
+
+    # ── Phase 2 ChatGPT プロンプト出力 ──────────────────────────────────────
+    try:
+        from phase2.prompt_generator import handoff_to_dict, print_prompt
+
+        world_ctx_lines = brand_ctx_fmt if brand_ctx_fmt != "なし" else ""
+        handoff = handoff_to_dict(
+            hook=hook,
+            post_type=post_type_str,
+            reality=reality_text,
+            world_context=world_ctx_lines,
+            topic=topic,
+            expert_angles=expert_angles,
+            ref_instagrams=[
+                {
+                    "url":   r.get("url", ""),
+                    "hook":  r.get("hook", ""),
+                    "likes": r.get("likes", 0),
+                    "saves": r.get("saves", 0),
+                    "plays": r.get("plays", 0),
+                }
+                for r in refs
+            ],
+        )
+        print_prompt(handoff)
+    except Exception as _e:
+        print(f"[phase2/prompt_generator] 出力スキップ: {_e}")
+        print()
 
 
 def print_phase1_summary(result: dict) -> None:

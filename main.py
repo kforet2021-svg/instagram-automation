@@ -1140,4 +1140,36 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import argparse as _argparse
+    _parser = _argparse.ArgumentParser(add_help=False)
+    _parser.add_argument("--thumbnail", action="store_true", help="サムネイル分析モードで実行")
+    _parser.add_argument("--test",      action="store_true", help="テストモード（3件のみ）")
+    _args, _unknown = _parser.parse_known_args()
+
+    if _args.thumbnail:
+        # ── サムネイル分析モード ──────────────────────────────────────────
+        try:
+            from thumbnail_analyzer import run_thumbnail_analysis, save_report
+            from sheets_writer import save_thumbnail_analysis
+
+            result = run_thumbnail_analysis(test_mode=_args.test)
+
+            # シート保存
+            if result["analyses"]:
+                save_thumbnail_analysis(result["analyses"])
+
+            # レポート保存
+            if result["report_md"]:
+                save_report(result["report_md"])
+                print("\n" + "=" * 60)
+                print(result["report_md"][:3000])
+                if len(result["report_md"]) > 3000:
+                    print("... （続きはレポートファイルを参照）")
+
+            print(f"\n[完了] 分析: {result['analyzed']}件 / 失敗: {len(result['skipped_urls'])}件")
+        except Exception as _e:
+            import traceback
+            print(f"サムネイル分析エラー: {_e}")
+            traceback.print_exc()
+    else:
+        main()
