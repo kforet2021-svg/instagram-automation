@@ -14,6 +14,20 @@ CORE HARI FACE — OpenAI Responses API 呼び出し + 自動検証 + 保存
   - クリップボードコピー（pbcopy、失敗しても続行）
   - --dry-run モード対応（APIを呼ばずプロンプトと保存先のみ表示）
 】
+【2026-07-15(4回目): 検証精度改善。
+  - カルーセル枚数: スライドN【 パターン（固有番号）で数える（Canva混入防止）
+  - _strip_md: 見出し行・セクション番号行・文字数記載を除去（本文のみ計測）
+  - Threads: 200〜400文字を厳密適用
+  - 30秒台本: 150〜180文字を厳密適用
+  - 60秒台本: 350〜400文字を厳密適用
+  - Expert Angle判定: キーワード一致 → OpenAI APIで YES/PARTIAL/NO 3段階判定
+  - CTA目的判定: 目的別キーワードを具体化
+  - ハッシュタグ: カテゴリ別（3+5+5+3）に分けて判定
+  - Hook回答: スライド2・3の本文量を厳密チェック
+  - チェック形式: (label, ok, note) → (label, status, note) PASS/WARNING/FAIL
+  - 品質スコア: ★★★★★ 表示を追加
+  - 自己採点上限: 強化版ペナルティ
+】
 """
 
 from __future__ import annotations
@@ -68,9 +82,26 @@ def _extract_section(content: str, marker: str) -> str:
 
 
 def _strip_md(text: str) -> str:
-    """Markdown記号・時間表記を除いた本文文字数カウント用。"""
-    text = re.sub(r"[#*_`~>\-]", "", text)
-    text = re.sub(r"\d+〜\d+秒[:：]?", "", text)
+    """
+    本文文字数カウント専用。以下を除去してから空白をゼロに畳む。
+    - Markdown見出し行（# ## ### ####）
+    - セクション番号で始まる行（例: ⑥ 30秒リール台本）
+    - 時間表記（0〜5秒: など）
+    - Markdown記号（* _ ` ~）
+    - 括弧内の文字数注記（（XX文字）など）
+    ※ #ハッシュタグ は呼び出し元で先に除去すること
+    """
+    # Markdown見出し行
+    text = re.sub(r"^#{1,4}\s[^\n]*\n?", "", text, flags=re.MULTILINE)
+    # セクション番号で始まる行（① 〜 ⑫ または 【 で始まる行）
+    text = re.sub(r"^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫【][^\n]*\n?", "", text, flags=re.MULTILINE)
+    # 時間表記
+    text = re.sub(r"\d+〜\d+秒[:：]?\s*", "", text)
+    # 括弧内の文字数注記
+    text = re.sub(r"（\d+[文字秒][^）]*）", "", text)
+    # Markdown強調記号（# は除外: ハッシュタグは呼び出し元で処理）
+    text = re.sub(r"[*_`~]", "", text)
+    # 空白を全部除去
     text = re.sub(r"\s+", "", text)
     return text
 
@@ -79,141 +110,239 @@ def _count_body(text: str) -> int:
     return len(_strip_md(text))
 
 
+# ── Expert Angle API判定 ──────────────────────────────────────────────────────
+
+def _check_expert_angle_api(carousel_text: str, expert_angles: list, model: str) -> tuple[str, str]:
+    """
+    Expert Angleの反映度をOpenAI APIで3段階（YES/PARTIAL/NO）判定する。
+    Returns: (status, reason_text)
+    """
+    if not expert_angles:
+        return "YES", "Expert Angle未設定のためスキップ"
+
+    ea_str = "\n".join(f"・{a}" for a in expert_angles)
+    prompt = (
+        "以下のInstagram投稿（カルーセル）は、ユーザーが選択したExpert Angleを"
+        "十分反映していますか。\n\n"
+        f"【Expert Angle】\n{ea_str}\n\n"
+        f"【カルーセル本文】\n{carousel_text[:1500]}\n\n"
+        "YES・PARTIAL・NOの3段階で評価し、理由を50文字以内で答えてください。\n"
+        "形式（1行のみ）: YES: 理由 / PARTIAL: 理由 / NO: 理由"
+    )
+    try:
+        from openai import OpenAI
+        from config import OPENAI_API_KEY
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        resp = client.responses.create(model=model, input=prompt)
+        answer = (resp.output_text or "").strip().splitlines()[0]
+        upper = answer.upper()
+        if upper.startswith("YES"):
+            return "YES", answer
+        elif upper.startswith("PARTIAL"):
+            return "PARTIAL", answer
+        else:
+            return "NO", answer
+    except Exception as e:
+        return "PARTIAL", f"API確認失敗（{str(e)[:40]}）"
+
+
+# ── CTA目的チェック ───────────────────────────────────────────────────────────
+
+_CTA_PURPOSE_PATTERNS: dict[str, str] = {
+    "保存": r"保存|見返",
+    "共感": r"コメント|教えてください|シェア|同じ.*方|どちら",
+    "信頼": r"コメント|質問|相談|気になること|迷ったら",
+    "行動": r"やってみてください|試してみてください|今日から|今すぐ|実践",
+    "予約": r"施術|プロの|まず.*自分",
+}
+
+
 # ── 検証ロジック ──────────────────────────────────────────────────────────────
 
-def validate_output(content: str, handoff: dict) -> dict:
+def validate_output(content: str, handoff: dict, model: str = "gpt-4o-mini") -> dict:
     """
-    生成テキストを20項目でチェックし、検証結果を返す。
+    生成テキストを検証する。
+
+    checks の各要素: (label, status, note)
+      status: "PASS" / "WARNING" / "FAIL"
 
     Returns:
         {
-            "checks": [(label, ok, note), ...],
-            "passed": bool,
+            "checks":       [(label, status, note), ...],
+            "passed":       bool,      # FAILが0件ならTrue
             "failed_items": [label],
+            "warning_items":[label],
         }
     """
     hook      = handoff.get("hook", "")
     post_type = handoff.get("post_type", "")
     ea_list   = handoff.get("expert_angles", [])
 
-    checks: list[tuple[str, bool, str]] = []
+    checks: list[tuple[str, str, str]] = []
 
     def chk(label: str, ok: bool, note: str = ""):
-        checks.append((label, ok, note))
+        checks.append((label, "PASS" if ok else "FAIL", note))
 
-    # 1. カルーセル7枚
+    def chk3(label: str, status: str, note: str = ""):
+        """status: PASS / WARNING / FAIL"""
+        checks.append((label, status, note))
+
+    # ── ① カルーセル7枚 ─────────────────────────────────────────────────
+    # "スライドN【" でヘッダーを数える（Canva の "スライドN:" との区別）
     s1 = _extract_section(content, "①")
-    slide_count = len(re.findall(r"スライド\d+", s1))
+    unique_slide_nums = set(re.findall(r"スライド(\d+)【", s1))
+    slide_count = len(unique_slide_nums)
     chk("カルーセル7枚", slide_count == 7, f"{slide_count}枚")
 
-    # 2. スライド1がHookと完全一致
-    slide1_match = re.search(r"スライド1[^スライド]*", s1)
-    hook_found = hook in (slide1_match.group(0) if slide1_match else s1[:300])
-    chk("スライド1Hook完全一致", hook_found)
+    # ── ② スライド1がHookと完全一致 ────────────────────────────────────
+    slide1_block = re.search(r"スライド1【[^】]*】[\s\S]*?(?=スライド2【|$)", s1)
+    hook_in_slide1 = hook.strip() in (slide1_block.group(0) if slide1_block else s1[:400])
+    chk("スライド1Hook完全一致", hook_in_slide1)
 
-    # 3. Hookの答えをスライド2か3で回収
-    slide23 = re.search(r"スライド[23][\s\S]*?(?=スライド4|$)", s1)
-    # 疑問・謎かけ系Hookかどうか（完全判定は難しいのでHookを含む場合を回収済みとみなす）
-    hook_head = hook.split("。")[0].replace("？", "").replace("?", "")[:10]
-    hook_answered = bool(slide23 and len(slide23.group(0)) > 20)
-    chk("Hookの答えをスライド2か3で回収", hook_answered)
+    # ── ③ Hookの答えをスライド2か3で回収 ───────────────────────────────
+    slide2_block = re.search(r"スライド2【[\s\S]*?(?=スライド3【|$)", s1)
+    slide3_block = re.search(r"スライド3【[\s\S]*?(?=スライド4【|$)", s1)
+    s2_text = slide2_block.group(0) if slide2_block else ""
+    s3_text = slide3_block.group(0) if slide3_block else ""
+    hook_answered = _count_body(s2_text) > 30 or _count_body(s3_text) > 30
+    chk("Hookの答えをスライド2か3で回収", hook_answered,
+        f"スライド2:{_count_body(s2_text)}字 / スライド3:{_count_body(s3_text)}字")
 
-    # 4. キャプション200〜300文字
-    s2 = _extract_section(content, "②")
-    cap_len = _count_body(s2)
+    # ── ④ キャプション200〜300文字 ─────────────────────────────────────
+    cap_body = _extract_section(content, "②")
+    cap_len = _count_body(cap_body)
     chk("キャプション200〜300文字", 200 <= cap_len <= 300, f"{cap_len}文字")
 
-    # 5. CTA 3案ある
-    s3 = _extract_section(content, "③")
-    cta_count = len(re.findall(r"^\d+\.", s3, re.MULTILINE))
+    # ── ⑤ CTA 3案ある ──────────────────────────────────────────────────
+    s3_sec = _extract_section(content, "③")
+    cta_count = len(re.findall(r"^\d+\.", s3_sec, re.MULTILINE))
     if cta_count < 3:
-        cta_count = len(re.findall(r"「.+?」", s3))
+        cta_count = len(re.findall(r"「.+?」", s3_sec))
     chk("CTA3案", cta_count >= 3, f"{cta_count}案")
 
-    # 6. CTAが投稿目的と一致
+    # ── ⑥ CTAが投稿目的と一致 ──────────────────────────────────────────
     purpose_key = post_type.replace("型", "").strip()
-    kws = _CTA_TYPE_KEYWORDS.get(purpose_key, [])
-    cta_match = any(kw in s3 for kw in kws) if kws else True
+    pat = _CTA_PURPOSE_PATTERNS.get(purpose_key, "")
+    cta_match = bool(re.search(pat, s3_sec)) if pat else True
     chk(f"CTA目的一致（{purpose_key}型）", cta_match)
 
-    # 7. Threads 200〜400文字
-    s4 = _extract_section(content, "④")
-    threads_body = re.sub(r"#\S+", "", s4)
+    # ── ⑦ Threads 200〜400文字 ─────────────────────────────────────────
+    s4_sec = _extract_section(content, "④")
+    threads_body = re.sub(r"#\S+", "", s4_sec)   # ハッシュタグ除外
     thr_len = _count_body(threads_body)
     chk("Threads200〜400文字", 200 <= thr_len <= 400, f"{thr_len}文字")
 
-    # 8. Threads末尾ハッシュタグ2〜3個
-    ht_in_threads = re.findall(r"#\S+", s4)
+    # ── ⑧ Threads末尾ハッシュタグ2〜3個 ───────────────────────────────
+    ht_in_threads = re.findall(r"#\S+", s4_sec)
     chk("Threadsハッシュタグ2〜3個", 2 <= len(ht_in_threads) <= 3, f"{len(ht_in_threads)}個")
 
-    # 9. X 140文字以内
-    s5 = _extract_section(content, "⑤")
-    x_len = _count_body(s5)
+    # ── ⑨ X 140文字以内 ────────────────────────────────────────────────
+    s5_sec = _extract_section(content, "⑤")
+    x_len = _count_body(s5_sec)
     chk("X140文字以内", x_len <= 140, f"{x_len}文字")
 
-    # 10. X末尾に文字数記載
-    x_has_count = bool(re.search(r"（\d+文字）", s5))
+    # ── ⑩ X末尾に文字数記載 ────────────────────────────────────────────
+    x_has_count = bool(re.search(r"（\d+文字）", s5_sec))
     chk("X文字数記載あり", x_has_count)
 
-    # 11. 30秒台本 150〜180文字
-    s6 = _extract_section(content, "⑥")
-    r30_len = _count_body(s6)
-    chk("30秒台本150〜180文字", 150 <= r30_len <= 220, f"{r30_len}文字")  # 多少の余裕あり
+    # ── ⑪ 30秒台本 150〜180文字（本文のみ） ────────────────────────────
+    s6_sec = _extract_section(content, "⑥")
+    r30_len = _count_body(s6_sec)
+    chk("30秒台本150〜180文字", 150 <= r30_len <= 180, f"{r30_len}文字")
 
-    # 12. 60秒台本 350〜400文字
-    s7 = _extract_section(content, "⑦")
-    r60_len = _count_body(s7)
-    chk("60秒台本350〜400文字", 320 <= r60_len <= 450, f"{r60_len}文字")
+    # ── ⑫ 60秒台本 350〜400文字（本文のみ） ────────────────────────────
+    s7_sec = _extract_section(content, "⑦")
+    r60_len = _count_body(s7_sec)
+    chk("60秒台本350〜400文字", 350 <= r60_len <= 400, f"{r60_len}文字")
 
-    # 13. Canva 7枚分
-    s8 = _extract_section(content, "⑧")
-    canva_count = len(re.findall(r"スライド\d+", s8))
+    # ── ⑬ Canva 7枚分 ──────────────────────────────────────────────────
+    s8_sec = _extract_section(content, "⑧")
+    canva_count = len(re.findall(r"スライド\d+【", s8_sec))
+    if canva_count == 0:
+        canva_count = len(set(re.findall(r"スライド(\d+)", s8_sec)))
     chk("Canva7枚分", canva_count == 7, f"{canva_count}枚")
 
-    # 14. タイトル5案
-    s9 = _extract_section(content, "⑨")
-    title_count = len(re.findall(r"^\d+\.", s9, re.MULTILINE))
+    # ── ⑭ タイトル5案 ──────────────────────────────────────────────────
+    s9_sec = _extract_section(content, "⑨")
+    title_count = len(re.findall(r"^\d+\.", s9_sec, re.MULTILINE))
     if title_count < 5:
-        title_count = len(re.findall(r"「.+?」", s9))
+        title_count = len(re.findall(r"「.+?」", s9_sec))
     chk("タイトル5案", title_count >= 5, f"{title_count}案")
 
-    # 15. ハッシュタグ16個（3+5+5+3）
-    s10 = _extract_section(content, "⑩")
-    all_tags = re.findall(r"#\S+", s10)
-    chk("ハッシュタグ16個", len(all_tags) == 16, f"{len(all_tags)}個")
+    # ── ⑮ ハッシュタグ カテゴリ別（3+5+5+3=16個、重複なし） ────────────
+    s10_sec = _extract_section(content, "⑩")
+    all_tags = re.findall(r"#\S+", s10_sec)
+    unique_tags = list(dict.fromkeys(all_tags))  # 順序保持で重複除去
 
-    # 16. ハッシュタグ重複なし
-    chk("ハッシュタグ重複なし", len(all_tags) == len(set(all_tags)))
+    # カテゴリラベル行で分割してカテゴリ別カウント
+    def _count_tags_in_block(text: str, label_pattern: str) -> int:
+        m = re.search(label_pattern + r"[^\n]*\n([\s\S]*?)(?=大カテゴリ|中カテゴリ|小カテゴリ|CORE|$)",
+                      text, re.IGNORECASE)
+        if not m or m.lastindex is None:
+            return -1
+        block = m.group(1) or ""
+        return len(re.findall(r"#\S+", block))
 
-    # 17. サムネイル3案
-    s12 = _extract_section(content, "⑫")
-    thumb_count = len(re.findall(r"\*\*案\d+", s12))
+    cat_large = _count_tags_in_block(s10_sec, r"大カテゴリ")
+    cat_mid   = _count_tags_in_block(s10_sec, r"中カテゴリ")
+    cat_small = _count_tags_in_block(s10_sec, r"小カテゴリ")
+    cat_brand = _count_tags_in_block(s10_sec, r"CORE\s*HARI|ブランド|専用")
+
+    total_unique = len(unique_tags)
+    tag_note_parts = [f"合計{total_unique}個"]
+    if cat_large >= 0: tag_note_parts.append(f"大{cat_large}")
+    if cat_mid   >= 0: tag_note_parts.append(f"中{cat_mid}")
+    if cat_small >= 0: tag_note_parts.append(f"小{cat_small}")
+    if cat_brand >= 0: tag_note_parts.append(f"ブランド{cat_brand}")
+    tag_note = " / ".join(tag_note_parts)
+
+    tag_ok = total_unique == 16
+    # カテゴリ分解できた場合は内訳も確認
+    if cat_large >= 0 and cat_mid >= 0 and cat_small >= 0 and cat_brand >= 0:
+        tag_ok = tag_ok and (cat_large == 3 and cat_mid == 5 and cat_small == 5 and cat_brand == 3)
+    chk("ハッシュタグ16個（3+5+5+3）", tag_ok, tag_note)
+
+    chk("ハッシュタグ重複なし", len(all_tags) == total_unique,
+        "" if len(all_tags) == total_unique else f"重複{len(all_tags) - total_unique}個")
+
+    # ── ⑯ サムネイル3案 ────────────────────────────────────────────────
+    s12_sec = _extract_section(content, "⑫")
+    thumb_count = len(re.findall(r"\*\*案\d+", s12_sec))
     if thumb_count == 0:
-        thumb_count = len(re.findall(r"案\d+[:：]", s12))
+        thumb_count = len(re.findall(r"案\d+[:：]", s12_sec))
     chk("サムネイル3案", thumb_count >= 3, f"{thumb_count}案")
 
-    # 18. 禁止表現なし
+    # ── ⑰ 禁止表現なし ─────────────────────────────────────────────────
     found_ng = [p for p in _FORBIDDEN_PHRASES if p in content]
     chk("禁止表現なし", len(found_ng) == 0, "、".join(found_ng) if found_ng else "")
 
-    # 19. Expert Angle反映
-    ea_reflected = False
-    for angle in ea_list:
-        words = [w for w in re.split(r"[、。・\s「」]", angle) if len(w) >= 2]
-        if any(w in s1 for w in words):
-            ea_reflected = True
-            break
-    chk("Expert Angle反映", ea_reflected or not ea_list)
+    # ── ⑱ Expert Angle反映（OpenAI API 3段階判定） ──────────────────────
+    if ea_list:
+        ea_status, ea_reason = _check_expert_angle_api(s1, ea_list, model)
+        if ea_status == "YES":
+            chk3("Expert Angle反映", "PASS", ea_reason)
+        elif ea_status == "PARTIAL":
+            chk3("Expert Angle反映", "WARNING", ea_reason)
+        else:
+            chk3("Expert Angle反映", "FAIL", ea_reason)
+    else:
+        chk3("Expert Angle反映", "PASS", "Expert Angle未設定")
 
-    # 20. リール優先サマリーあり
+    # ── ⑲ リール優先サマリーあり ────────────────────────────────────────
     reel_summary = _extract_section(content, "【リール優先サマリー】")
     chk("リール優先サマリーあり", len(reel_summary) > 50)
 
-    failed = [label for label, ok, _ in checks if not ok]
-    return {"checks": checks, "passed": len(failed) == 0, "failed_items": failed}
+    failed   = [label for label, status, _ in checks if status == "FAIL"]
+    warnings = [label for label, status, _ in checks if status == "WARNING"]
+    return {
+        "checks":        checks,
+        "passed":        len(failed) == 0,
+        "failed_items":  failed,
+        "warning_items": warnings,
+    }
 
 
-# ── AIスコア調整 ──────────────────────────────────────────────────────────────
+# ── AIスコア調整（強化版） ────────────────────────────────────────────────────
 
 def _adjust_score(content: str, validation: dict) -> tuple[int, str]:
     """
@@ -226,31 +355,58 @@ def _adjust_score(content: str, validation: dict) -> tuple[int, str]:
     penalties = []
     cap = ai_score
 
-    failed = set(validation.get("failed_items", []))
+    failed   = set(validation.get("failed_items", []))
+    warnings = set(validation.get("warning_items", []))
 
+    # 形式違反がある場合 → 95点以上禁止
+    if failed and cap >= 95:
+        cap = 94
+        penalties.append("形式違反あり: 合計95点以上禁止 → 上限94点")
+
+    # Hook未回収 → Hook力最大12点相当 → 合計上限80点
     if "Hookの答えをスライド2か3で回収" in failed:
         if cap > 80:
             cap = 80
-        penalties.append("Hook未回収: Hook力は最大12点相当 → 合計上限80点")
+        penalties.append("Hook未回収: Hook力最大12点 → 合計上限80点")
 
-    if "禁止表現なし" in failed:
-        if cap > 70:
-            cap = 70
-        penalties.append("禁止表現あり: NG遵守は最大5点相当 → 合計上限70点")
-
-    if any("CTA" in f for f in failed):
-        if cap > 75:
-            cap = 75
-        penalties.append("CTA不一致: 全体の一貫性は最大5点相当 → 合計上限75点")
-
-    if "ハッシュタグ16個" in failed:
-        cap = max(0, cap - 5)
-        penalties.append("ハッシュタグ不足: -5点")
-
+    # Expert Angle FAIL → CORE HARI独自性最大10点 → 合計上限80点
     if "Expert Angle反映" in failed:
         if cap > 80:
             cap = 80
-        penalties.append("Expert Angle未反映: CORE HARI独自性は最大10点相当 → 合計上限80点")
+        penalties.append("Expert Angle FAIL: CORE HARI最大10点 → 合計上限80点")
+    elif "Expert Angle反映" in warnings:
+        if cap > 88:
+            cap = 88
+        penalties.append("Expert Angle WARNING: CORE HARI最大15点 → 合計上限88点")
+
+    # Threads文字数FAIL → 共感最大10点 → 合計上限85点
+    if "Threads200〜400文字" in failed:
+        if cap > 85:
+            cap = 85
+        penalties.append("Threads文字数FAIL: 共感最大10点 → 合計上限85点")
+
+    # 60秒台本FAIL → セルフケア最大10点 → 合計上限85点
+    if "60秒台本350〜400文字" in failed:
+        if cap > 85:
+            cap = 85
+        penalties.append("60秒台本FAIL: セルフケア最大10点 → 合計上限85点")
+
+    # ハッシュタグ不足 → -5点
+    if "ハッシュタグ16個（3+5+5+3）" in failed:
+        cap = max(0, cap - 5)
+        penalties.append("ハッシュタグ不足: -5点")
+
+    # 禁止表現 → NG遵守最大5点 → 合計上限70点
+    if "禁止表現なし" in failed:
+        if cap > 70:
+            cap = 70
+        penalties.append("禁止表現あり: NG遵守最大5点 → 合計上限70点")
+
+    # CTA不一致 → 全体の一貫性最大5点 → 合計上限75点
+    if any("CTA目的" in f for f in failed):
+        if cap > 75:
+            cap = 75
+        penalties.append("CTA不一致: 全体の一貫性最大5点 → 合計上限75点")
 
     explanation = "\n".join(penalties) if penalties else "プログラム検証の減点なし"
     return cap, explanation
@@ -355,10 +511,11 @@ def _save_outputs(
         "final_score": final_score,
         "score_note": score_note,
         "checks": [
-            {"label": label, "ok": ok, "note": note}
-            for label, ok, note in validation["checks"]
+            {"label": label, "status": status, "note": note}
+            for label, status, note in validation["checks"]
         ],
-        "failed_items": validation["failed_items"],
+        "failed_items":  validation["failed_items"],
+        "warning_items": validation.get("warning_items", []),
     }
     with open(val_path, "w", encoding="utf-8") as f:
         json.dump(val_data, f, ensure_ascii=False, indent=2)
@@ -395,26 +552,42 @@ def _copy_to_clipboard(text: str) -> bool:
 
 # ── 検証結果表示 ──────────────────────────────────────────────────────────────
 
+def _quality_stars(fail_count: int, warn_count: int) -> tuple[str, str]:
+    """品質スコアの星とコメントを返す。"""
+    if fail_count == 0:
+        return "★★★★★", "投稿OK"
+    elif fail_count <= 2:
+        return "★★★★☆", "軽微修正"
+    elif fail_count <= 4:
+        return "★★★☆☆", "再生成推奨"
+    elif fail_count <= 6:
+        return "★★☆☆☆", "再生成推奨"
+    else:
+        return "★☆☆☆☆", "再生成推奨"
+
+
 def _print_validation(validation: dict, final_score: int, score_note: str) -> None:
     sep = "-" * 50
     print()
     print(sep)
     print("  自動検証結果")
     print(sep)
-    for label, ok, note in validation["checks"]:
-        status = "PASS" if ok else "FAIL"
+    for label, status, note in validation["checks"]:
         line = f"  {status}: {label}"
         if note:
-            line += f" ({note})"
+            line += f"  {note}"
         print(line)
     print(sep)
-    print(f"  最終スコア: {final_score}点")
+
+    fail_count = len(validation.get("failed_items", []))
+    warn_count = len(validation.get("warning_items", []))
+    stars, star_label = _quality_stars(fail_count, warn_count)
+
+    print(f"  品質スコア: {stars}  {star_label}")
+    print(f"  最終スコア: {final_score}点  (FAIL:{fail_count}件 / WARNING:{warn_count}件)")
     if score_note != "プログラム検証の減点なし":
-        print(f"  調整内容: {score_note}")
-    if validation["passed"]:
-        print("  → 全項目PASS")
-    else:
-        print(f"  → FAIL項目: {', '.join(validation['failed_items'])}")
+        for line in score_note.split("\n"):
+            print(f"    {line}")
     print(sep)
     print()
 
@@ -495,7 +668,7 @@ def generate_post(handoff: dict, dry_run: bool = False) -> Optional[dict]:
         return None
 
     # ── 初回検証 ────────────────────────────────────────────────────────
-    validation = validate_output(content, handoff)
+    validation = validate_output(content, handoff, model=OPENAI_MODEL)
     final_score, score_note = _adjust_score(content, validation)
 
     _print_validation(validation, final_score, score_note)
@@ -519,7 +692,7 @@ def generate_post(handoff: dict, dry_run: bool = False) -> Optional[dict]:
             regen_count = 1
             content = content2
 
-            validation = validate_output(content, handoff)
+            validation = validate_output(content, handoff, model=OPENAI_MODEL)
             final_score, score_note = _adjust_score(content, validation)
             _print_validation(validation, final_score, score_note)
 
