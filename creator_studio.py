@@ -3110,9 +3110,10 @@ def _print_chatgpt_handoff(
     print(SEP)
     print()
 
-    # ── Phase 2 ChatGPT プロンプト出力 ──────────────────────────────────────
+    # ── Phase 2 投稿生成（OpenAI API経由で①〜⑪を自動生成） ────────────────
     try:
-        from phase2.prompt_generator import handoff_to_dict, print_prompt
+        from phase2.prompt_generator import handoff_to_dict
+        from phase2.post_generator import run_phase2
 
         world_ctx_lines = brand_ctx_fmt if brand_ctx_fmt != "なし" else ""
         handoff = handoff_to_dict(
@@ -3133,9 +3134,11 @@ def _print_chatgpt_handoff(
                 for r in refs
             ],
         )
-        print_prompt(handoff)
+        run_phase2(handoff)
     except Exception as _e:
-        print(f"[phase2/prompt_generator] 出力スキップ: {_e}")
+        import traceback
+        print(f"[Phase2] エラー: {_e}")
+        traceback.print_exc()
         print()
 
 
