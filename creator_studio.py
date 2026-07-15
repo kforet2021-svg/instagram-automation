@@ -3110,10 +3110,10 @@ def _print_chatgpt_handoff(
     print(SEP)
     print()
 
-    # ── Phase 2 投稿生成（OpenAI API経由で①〜⑪を自動生成） ────────────────
+    # ── ChatGPT渡しプロンプト生成・表示・Markdown保存 ───────────────────────
     try:
-        from phase2.prompt_generator import handoff_to_dict
-        from phase2.post_generator import run_phase2
+        from phase2.prompt_generator import handoff_to_dict, build_prompt
+        import os, datetime as _dt
 
         world_ctx_lines = brand_ctx_fmt if brand_ctx_fmt != "なし" else ""
         handoff = handoff_to_dict(
@@ -3134,10 +3134,40 @@ def _print_chatgpt_handoff(
                 for r in refs
             ],
         )
-        run_phase2(handoff)
+
+        prompt_text = build_prompt(handoff)
+
+        # ターミナル表示
+        PSEP = "=" * 60
+        print()
+        print(PSEP)
+        print("  ChatGPT 渡し用プロンプト（以下をそのままコピーして貼り付けてください）")
+        print(PSEP)
+        print()
+        print(prompt_text)
+        print(PSEP)
+        print()
+
+        # Markdownファイルに保存
+        _base = os.path.dirname(os.path.abspath(__file__))
+        _out_dir = os.path.join(_base, "outputs")
+        os.makedirs(_out_dir, exist_ok=True)
+        _ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        _path = os.path.join(_out_dir, f"chatgpt_prompt_{_ts}.md")
+        with open(_path, "w", encoding="utf-8") as _f:
+            _f.write(f"# CORE HARI FACE — ChatGPT渡しプロンプト\n\n")
+            _f.write(f"生成日時: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            _f.write(f"**Hook**: {hook}\n\n")
+            _f.write(f"**投稿目的**: {post_type_str}\n\n")
+            _f.write(f"**Topic**: {topic}\n\n")
+            _f.write("---\n\n")
+            _f.write(prompt_text)
+        print(f"  保存先: {_path}")
+        print()
+
     except Exception as _e:
         import traceback
-        print(f"[Phase2] エラー: {_e}")
+        print(f"[ChatGPTプロンプト生成] エラー: {_e}")
         traceback.print_exc()
         print()
 
