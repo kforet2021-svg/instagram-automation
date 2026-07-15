@@ -313,7 +313,8 @@ def _save_outputs(
     base_dir: str,
 ) -> dict[str, str]:
     """
-    3種類のファイルを保存し、パスを返す。
+    タイムスタンプ付き3ファイルを保存してパスを返す。
+    latest_instagram_post.md の書き込みは呼び出し元で行う（独立させてある）。
     """
     out_dir  = os.path.join(base_dir, "outputs")
     inp_dir  = os.path.join(base_dir, "outputs", "inputs")
@@ -362,11 +363,21 @@ def _save_outputs(
     with open(val_path, "w", encoding="utf-8") as f:
         json.dump(val_data, f, ensure_ascii=False, indent=2)
 
-    # 4. 最新ファイル（常に上書き）
-    latest_path = os.path.join(out_dir, "latest_instagram_post.md")
-    shutil.copy2(post_path, latest_path)
+    return {"post": post_path, "input": inp_path, "validation": val_path}
 
-    return {"post": post_path, "input": inp_path, "validation": val_path, "latest": latest_path}
+
+def _update_latest(post_path: str, base_dir: str) -> str:
+    """
+    post_path の内容を latest_instagram_post.md へ上書きコピーし、パスを返す。
+    失敗時は RuntimeError を上げる（呼び出し元で個別に catch すること）。
+    """
+    out_dir     = os.path.join(base_dir, "outputs")
+    latest_path = os.path.join(out_dir, "latest_instagram_post.md")
+    with open(post_path, "r", encoding="utf-8") as src:
+        data = src.read()
+    with open(latest_path, "w", encoding="utf-8") as dst:
+        dst.write(data)
+    return latest_path
 
 
 # ── クリップボード ────────────────────────────────────────────────────────────
@@ -520,13 +531,6 @@ def generate_post(handoff: dict, dry_run: bool = False) -> Optional[dict]:
         except Exception as e:
             print(f"  [警告] 再生成中にエラー: {e}。初回生成結果を使用します。")
 
-    # ── 保存 ────────────────────────────────────────────────────────────
-    try:
-        paths = _save_outputs(content, handoff, validation, final_score, score_note, ts, base_dir)
-    except Exception as e:
-        print(f"  [エラー] ファイル保存失敗: {e}")
-        paths = {}
-
     # ── ターミナル表示 ──────────────────────────────────────────────────
     print()
     print(SEP)
@@ -537,10 +541,28 @@ def generate_post(handoff: dict, dry_run: bool = False) -> Optional[dict]:
     print()
     print(SEP)
     print(f"  再生成回数: {regen_count}回 / 最終スコア: {final_score}点")
-    if paths:
-        print(f"  保存先: {paths.get('post', '')}")
-        print(f"  最新版: {paths.get('latest', '')}")
     print(SEP)
+    print()
+
+    # ── 保存（タイムスタンプ付き3ファイル） ────────────────────────────
+    paths: dict[str, str] = {}
+    try:
+        paths = _save_outputs(
+            content, handoff, validation, final_score, score_note, ts, base_dir
+        )
+        post_basename = os.path.basename(paths["post"])
+        print(f"  ✔ 保存  {post_basename}")
+    except Exception as e:
+        print(f"  [エラー] ファイル保存失敗: {e}")
+
+    # ── latest_instagram_post.md へコピー（保存成功時のみ）──────────────
+    if paths.get("post"):
+        try:
+            latest_path = _update_latest(paths["post"], base_dir)
+            paths["latest"] = latest_path
+            print(f"  ✔ 最新版更新  {os.path.basename(latest_path)}")
+        except Exception as e:
+            print(f"  [警告] latest_instagram_post.md の更新に失敗しました: {e}")
     print()
 
     # ── クリップボード ──────────────────────────────────────────────────
