@@ -1144,7 +1144,14 @@ if __name__ == "__main__":
     _parser = _argparse.ArgumentParser(add_help=False)
     _parser.add_argument("--thumbnail", action="store_true", help="サムネイル分析モードで実行")
     _parser.add_argument("--test",      action="store_true", help="テストモード（3件のみ）")
+    _parser.add_argument("--dry-run",   action="store_true", dest="dry_run",
+                         help="APIを呼ばずプロンプトと保存先のみ表示")
     _args, _unknown = _parser.parse_known_args()
+
+    # dry-run フラグを creator_studio モジュールへ伝達
+    if _args.dry_run:
+        import creator_studio as _cs
+        _cs._DRY_RUN = True
 
     if _args.thumbnail:
         # ── サムネイル分析モード ──────────────────────────────────────────

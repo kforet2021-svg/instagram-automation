@@ -38,6 +38,8 @@ REGION: str = os.getenv("REGION", "北海道札幌市")
 
 # --- API認証情報 ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# 投稿生成に使うモデル（.envで変更可能。未設定時はgpt-4o-mini）
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 BRIGHT_DATA_API_KEY = os.getenv("BRIGHT_DATA_API_KEY", "")
 
 # --- Googleスプレッドシート ---

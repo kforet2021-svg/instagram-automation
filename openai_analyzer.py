@@ -64,7 +64,7 @@ import re
 
 from openai import OpenAI
 
-from config import OPENAI_API_KEY
+from config import OPENAI_API_KEY, OPENAI_MODEL
 from prompts import (
     SYSTEM_PROMPT,
     POST_ANALYSIS_SYSTEM_PROMPT,
@@ -89,7 +89,7 @@ from prompts import (
     build_north_star_daily_prompt,
 )
 
-MODEL_NAME = "gpt-4o-mini"
+MODEL_NAME = OPENAI_MODEL  # .envのOPENAI_MODELで変更可能。未設定時はgpt-4o-mini
 
 _client = None
 

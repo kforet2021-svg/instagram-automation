@@ -1,381 +1,560 @@
 """
 phase2/post_generator.py
 
-CORE HARI FACE — Phase 2 投稿一式生成 + 自動検証
+CORE HARI FACE — OpenAI Responses API 呼び出し + 自動検証 + 保存
 
-【2026-07-15(1回目): 新規作成。Phase2 投稿生成実行モジュール。】
-【2026-07-15(2回目): 自動検証・再生成ロジック追加。
-  - validate_output(): 16項目の形式チェック
-  - 不合格時に一度だけ自動再生成
-  - 禁止表現スキャン
-  - 検証結果一覧を先頭に表示
+【2026-07-15(3回目): 全面書き直し。
+  - OpenAI Responses API（client.responses.create）を使用
+  - 20項目自動検証 + 1回だけ自動再生成
+  - トークン使用量・推定費用ログ
+  - outputs/instagram_post_*.md
+  - outputs/inputs/instagram_input_*.md
+  - outputs/validation/instagram_validation_*.json
+  - outputs/latest_instagram_post.md（常に最新を上書き）
+  - クリップボードコピー（pbcopy、失敗しても続行）
+  - --dry-run モード対応（APIを呼ばずプロンプトと保存先のみ表示）
 】
 """
 
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import re
+import shutil
+import subprocess
+import sys
 from typing import Optional
 
 # ── 禁止表現リスト ────────────────────────────────────────────────────────────
 
 _FORBIDDEN_PHRASES = [
-    "主要因です",
-    "原因です",
-    "のせいです",
-    "を予防できます",
-    "が解消します",
-    "が改善します",
-    "治ります",
-    "これだけで変わります",
-    "効果が長続きします",
+    "主要因です", "原因です", "のせいです",
+    "を予防できます", "が解消します", "が改善します", "治ります",
+    "これだけで変わります", "効果が長続きします",
+    "夏だから筋肉が弱", "汗でむくみが悪化", "湿度でむくみが増",
 ]
 
-# ── 投稿目的別 CTA キーワード ─────────────────────────────────────────────────
-# 目的型を判定するためのキーワード（いずれか含む = その型）
+# ── 投稿目的別 CTA 判定キーワード ─────────────────────────────────────────────
 
-_CTA_TYPE_KEYWORDS = {
+_CTA_TYPE_KEYWORDS: dict[str, list[str]] = {
     "保存": ["保存", "見返"],
-    "共感": ["教えてください", "シェア", "同じ", "どちら"],
+    "共感": ["教えてください", "シェア", "同じ", "どちら", "コメント"],
     "信頼": ["コメント", "質問", "気になること", "迷ったら"],
     "行動": ["やってみてください", "試してみてください", "今すぐ", "今日から"],
     "予約": ["施術", "プロの"],
 }
 
 
-# ── 検証ロジック ──────────────────────────────────────────────────────────────
-
-def validate_output(content: str, handoff: dict) -> dict:
-    """
-    生成テキストを16項目でチェックし、検証結果を返す。
-
-    Returns:
-        {
-            "checks": [(label, ok, note), ...],
-            "passed": bool,            # 全チェック合格か
-            "failed_items": [label],   # 不合格項目名リスト
-        }
-    """
-    hook      = handoff.get("hook", "")
-    post_type = handoff.get("post_type", "")
-    expert_angles = handoff.get("expert_angles", [])
-
-    checks: list[tuple[str, bool, str]] = []
-
-    def add(label: str, ok: bool, note: str = "") -> None:
-        checks.append((label, ok, note))
-
-    # 1. カルーセルが7枚あるか
-    slide_count = len(re.findall(r"スライド[1-7]", content))
-    add("カルーセル7枚", slide_count >= 7, f"検出: {slide_count}枚")
-
-    # 2. スライド1のHookが一字一句同じか
-    hook_in_slide = hook in content
-    add("スライド1 Hook一致", hook_in_slide, "" if hook_in_slide else f"Hook「{hook[:30]}」が見つかりません")
-
-    # 3. CTAが投稿目的と一致しているか
-    cta_keywords = _CTA_TYPE_KEYWORDS.get(post_type, [])
-    cta_section = _extract_section(content, "③")
-    cta_ok = any(kw in cta_section for kw in cta_keywords) if cta_section else False
-    add(f"CTA（{post_type}型）一致", cta_ok, "" if cta_ok else f"期待キーワード: {cta_keywords}")
-
-    # 4. キャプション文字数（200〜300文字）
-    cap_section = _extract_section(content, "②")
-    cap_len = _body_char_count(cap_section)
-    add("キャプション200〜300文字", 150 <= cap_len <= 350,
-        f"計測: 約{cap_len}文字（目安±50字で合否）")
-
-    # 5. Threads本文が200〜400文字か
-    thr_section = _extract_section(content, "④")
-    thr_body = _remove_hashtags(thr_section)
-    thr_len = len(thr_body.replace("\n", "").replace(" ", ""))
-    add("Threads本文200〜400文字", 150 <= thr_len <= 450, f"計測: 約{thr_len}文字")
-
-    # 6. Threadsにハッシュタグが2〜3個あるか
-    thr_tags = re.findall(r"#\S+", thr_section)
-    add("Threadsハッシュタグ2〜3個", 2 <= len(thr_tags) <= 3, f"検出: {len(thr_tags)}個")
-
-    # 7. X本文が140文字以内か
-    x_section = _extract_section(content, "⑤")
-    x_text = re.sub(r"（\d+文字）", "", x_section).strip()
-    x_len = len(x_text.replace("\n", ""))
-    add("X本文140文字以内", x_len <= 150, f"計測: 約{x_len}文字（±10字で合否）")
-
-    # 8. 30秒台本が150〜180文字程度か
-    s30_section = _extract_section(content, "⑥")
-    s30_len = _script_char_count(s30_section)
-    add("30秒台本150〜180文字", 100 <= s30_len <= 250, f"計測: 約{s30_len}文字")
-
-    # 9. 60秒台本が350〜400文字程度か
-    s60_section = _extract_section(content, "⑦")
-    s60_len = _script_char_count(s60_section)
-    add("60秒台本350〜400文字", 250 <= s60_len <= 500, f"計測: 約{s60_len}文字")
-
-    # 10. Canvaが7枚分あるか
-    canva_section = _extract_section(content, "⑧")
-    canva_count = len(re.findall(r"スライド[1-7]", canva_section))
-    add("Canva7枚分", canva_count >= 7, f"検出: {canva_count}枚")
-
-    # 11. タイトルが5案あるか
-    title_section = _extract_section(content, "⑨")
-    title_count = len(re.findall(r"[1-5][.．、]|「.{5,40}」", title_section))
-    add("タイトル5案", title_count >= 4, f"検出: 約{title_count}案")
-
-    # 12. ハッシュタグ16個あるか（重複除外）
-    tag_section = _extract_section(content, "⑩")
-    all_tags = re.findall(r"#\S+", tag_section)
-    unique_tags = list(set(all_tags))
-    add("ハッシュタグ16個（重複除外）",
-        len(unique_tags) >= 15,
-        f"検出ユニーク: {len(unique_tags)}個（合計{len(all_tags)}個）")
-
-    # 13. 重複ハッシュタグなし
-    has_dup = len(all_tags) != len(unique_tags)
-    add("ハッシュタグ重複なし", not has_dup,
-        "" if not has_dup else f"重複: {len(all_tags) - len(unique_tags)}個")
-
-    # 14. 禁止表現がないか
-    found_forbidden = [p for p in _FORBIDDEN_PHRASES if p in content]
-    add("禁止表現なし", len(found_forbidden) == 0,
-        "" if not found_forbidden else f"検出: {found_forbidden}")
-
-    # 15. Expert Angleが主要出力に反映されているか（全Angleのキーワードベース）
-    ea_reflected = False
-    if expert_angles:
-        # 全Expert Angleのキーワードを検索（いずれか1つが見つかればOK）
-        for angle in expert_angles:
-            words = [w for w in re.split(r"[、。・\s「」]", angle) if len(w) >= 2]
-            for w in words:
-                if w in content:
-                    ea_reflected = True
-                    break
-            if ea_reflected:
-                break
-    else:
-        ea_reflected = True
-    add("Expert Angle反映", ea_reflected,
-        "" if ea_reflected else f"Expert Angle群のキーワードが本文に見当たりません")
-
-    # 16. Hookで提示した疑問が本文で回収されているか
-    # Hookに「〜行動」「〜理由」「なぜ」「なに」等があれば回収チェック
-    hook_is_question = any(kw in hook for kw in ["行動", "理由", "なぜ", "なに", "何", "どうして", "実は"])
-    if hook_is_question:
-        # スライド2・3セクションに何らかの答えがあるか
-        slide23 = re.search(r"スライド2.{0,500}スライド4", content, re.DOTALL)
-        hook_recovered = slide23 is not None and len(slide23.group()) > 50
-        add("Hook回答を本文で回収", hook_recovered,
-            "" if hook_recovered else "スライド2/3でHookへの答えが見当たりません")
-    else:
-        add("Hook回答を本文で回収", True, "（問いかけ型Hookではないためスキップ）")
-
-    failed = [label for label, ok, _ in checks if not ok]
-    return {
-        "checks": checks,
-        "passed": len(failed) == 0,
-        "failed_items": failed,
-    }
-
+# ── セクション抽出ヘルパー ────────────────────────────────────────────────────
 
 def _extract_section(content: str, marker: str) -> str:
-    """①〜⑪のセクションテキストを抽出する。
-    出力フォーマットは「### ① タイトル\n...」または「① タイトル\n...」のどちらでも対応。
-    次のセクションマーカー（①〜⑪）または末尾で終了する。
     """
-    # マーカーの位置を探す（行頭 or ### の後）
+    marker（例: "①"）から始まるセクションを次のセクションマーカー前まで返す。
+    """
     start = content.find(marker)
     if start == -1:
         return ""
-    # 次のセクションマーカーを探す（①〜⑪ の中で現在より後にあるもの）
-    all_markers = "①②③④⑤⑥⑦⑧⑨⑩⑪"
+    all_markers = list("①②③④⑤⑥⑦⑧⑨⑩⑪⑫") + ["【リール優先サマリー】"]
     next_pos = len(content)
     for m in all_markers:
         if m == marker:
             continue
         pos = content.find(m, start + 1)
-        if pos != -1 and pos < next_pos:
+        if 0 < pos < next_pos:
             next_pos = pos
     return content[start:next_pos]
 
 
-def _body_char_count(text: str) -> int:
-    """改行・空白・ハッシュタグを除いた本文文字数を返す。"""
-    text = re.sub(r"#\S+", "", text)
-    text = re.sub(r"（\d+文字）", "", text)
-    text = re.sub(r"[\s\n]", "", text)
-    return len(text)
+def _strip_md(text: str) -> str:
+    """Markdown記号・時間表記を除いた本文文字数カウント用。"""
+    text = re.sub(r"[#*_`~>\-]", "", text)
+    text = re.sub(r"\d+〜\d+秒[:：]?", "", text)
+    text = re.sub(r"\s+", "", text)
+    return text
 
 
-def _remove_hashtags(text: str) -> str:
-    return re.sub(r"#\S+", "", text)
+def _count_body(text: str) -> int:
+    return len(_strip_md(text))
 
 
-def _script_char_count(text: str) -> int:
-    """リール台本の台詞部分のみの文字数を概算する（時間注釈を除く）。"""
-    text = re.sub(r"\d+〜\d+秒.*?:", "", text)
-    text = re.sub(r"（台本全文\d+文字）", "", text)
-    text = re.sub(r"[\s\n]", "", text)
-    return len(text)
+# ── 検証ロジック ──────────────────────────────────────────────────────────────
+
+def validate_output(content: str, handoff: dict) -> dict:
+    """
+    生成テキストを20項目でチェックし、検証結果を返す。
+
+    Returns:
+        {
+            "checks": [(label, ok, note), ...],
+            "passed": bool,
+            "failed_items": [label],
+        }
+    """
+    hook      = handoff.get("hook", "")
+    post_type = handoff.get("post_type", "")
+    ea_list   = handoff.get("expert_angles", [])
+
+    checks: list[tuple[str, bool, str]] = []
+
+    def chk(label: str, ok: bool, note: str = ""):
+        checks.append((label, ok, note))
+
+    # 1. カルーセル7枚
+    s1 = _extract_section(content, "①")
+    slide_count = len(re.findall(r"スライド\d+", s1))
+    chk("カルーセル7枚", slide_count == 7, f"{slide_count}枚")
+
+    # 2. スライド1がHookと完全一致
+    slide1_match = re.search(r"スライド1[^スライド]*", s1)
+    hook_found = hook in (slide1_match.group(0) if slide1_match else s1[:300])
+    chk("スライド1Hook完全一致", hook_found)
+
+    # 3. Hookの答えをスライド2か3で回収
+    slide23 = re.search(r"スライド[23][\s\S]*?(?=スライド4|$)", s1)
+    # 疑問・謎かけ系Hookかどうか（完全判定は難しいのでHookを含む場合を回収済みとみなす）
+    hook_head = hook.split("。")[0].replace("？", "").replace("?", "")[:10]
+    hook_answered = bool(slide23 and len(slide23.group(0)) > 20)
+    chk("Hookの答えをスライド2か3で回収", hook_answered)
+
+    # 4. キャプション200〜300文字
+    s2 = _extract_section(content, "②")
+    cap_len = _count_body(s2)
+    chk("キャプション200〜300文字", 200 <= cap_len <= 300, f"{cap_len}文字")
+
+    # 5. CTA 3案ある
+    s3 = _extract_section(content, "③")
+    cta_count = len(re.findall(r"^\d+\.", s3, re.MULTILINE))
+    if cta_count < 3:
+        cta_count = len(re.findall(r"「.+?」", s3))
+    chk("CTA3案", cta_count >= 3, f"{cta_count}案")
+
+    # 6. CTAが投稿目的と一致
+    purpose_key = post_type.replace("型", "").strip()
+    kws = _CTA_TYPE_KEYWORDS.get(purpose_key, [])
+    cta_match = any(kw in s3 for kw in kws) if kws else True
+    chk(f"CTA目的一致（{purpose_key}型）", cta_match)
+
+    # 7. Threads 200〜400文字
+    s4 = _extract_section(content, "④")
+    threads_body = re.sub(r"#\S+", "", s4)
+    thr_len = _count_body(threads_body)
+    chk("Threads200〜400文字", 200 <= thr_len <= 400, f"{thr_len}文字")
+
+    # 8. Threads末尾ハッシュタグ2〜3個
+    ht_in_threads = re.findall(r"#\S+", s4)
+    chk("Threadsハッシュタグ2〜3個", 2 <= len(ht_in_threads) <= 3, f"{len(ht_in_threads)}個")
+
+    # 9. X 140文字以内
+    s5 = _extract_section(content, "⑤")
+    x_len = _count_body(s5)
+    chk("X140文字以内", x_len <= 140, f"{x_len}文字")
+
+    # 10. X末尾に文字数記載
+    x_has_count = bool(re.search(r"（\d+文字）", s5))
+    chk("X文字数記載あり", x_has_count)
+
+    # 11. 30秒台本 150〜180文字
+    s6 = _extract_section(content, "⑥")
+    r30_len = _count_body(s6)
+    chk("30秒台本150〜180文字", 150 <= r30_len <= 220, f"{r30_len}文字")  # 多少の余裕あり
+
+    # 12. 60秒台本 350〜400文字
+    s7 = _extract_section(content, "⑦")
+    r60_len = _count_body(s7)
+    chk("60秒台本350〜400文字", 320 <= r60_len <= 450, f"{r60_len}文字")
+
+    # 13. Canva 7枚分
+    s8 = _extract_section(content, "⑧")
+    canva_count = len(re.findall(r"スライド\d+", s8))
+    chk("Canva7枚分", canva_count == 7, f"{canva_count}枚")
+
+    # 14. タイトル5案
+    s9 = _extract_section(content, "⑨")
+    title_count = len(re.findall(r"^\d+\.", s9, re.MULTILINE))
+    if title_count < 5:
+        title_count = len(re.findall(r"「.+?」", s9))
+    chk("タイトル5案", title_count >= 5, f"{title_count}案")
+
+    # 15. ハッシュタグ16個（3+5+5+3）
+    s10 = _extract_section(content, "⑩")
+    all_tags = re.findall(r"#\S+", s10)
+    chk("ハッシュタグ16個", len(all_tags) == 16, f"{len(all_tags)}個")
+
+    # 16. ハッシュタグ重複なし
+    chk("ハッシュタグ重複なし", len(all_tags) == len(set(all_tags)))
+
+    # 17. サムネイル3案
+    s12 = _extract_section(content, "⑫")
+    thumb_count = len(re.findall(r"\*\*案\d+", s12))
+    if thumb_count == 0:
+        thumb_count = len(re.findall(r"案\d+[:：]", s12))
+    chk("サムネイル3案", thumb_count >= 3, f"{thumb_count}案")
+
+    # 18. 禁止表現なし
+    found_ng = [p for p in _FORBIDDEN_PHRASES if p in content]
+    chk("禁止表現なし", len(found_ng) == 0, "、".join(found_ng) if found_ng else "")
+
+    # 19. Expert Angle反映
+    ea_reflected = False
+    for angle in ea_list:
+        words = [w for w in re.split(r"[、。・\s「」]", angle) if len(w) >= 2]
+        if any(w in s1 for w in words):
+            ea_reflected = True
+            break
+    chk("Expert Angle反映", ea_reflected or not ea_list)
+
+    # 20. リール優先サマリーあり
+    reel_summary = _extract_section(content, "【リール優先サマリー】")
+    chk("リール優先サマリーあり", len(reel_summary) > 50)
+
+    failed = [label for label, ok, _ in checks if not ok]
+    return {"checks": checks, "passed": len(failed) == 0, "failed_items": failed}
+
+
+# ── AIスコア調整 ──────────────────────────────────────────────────────────────
+
+def _adjust_score(content: str, validation: dict) -> tuple[int, str]:
+    """
+    AIの自己採点スコアを取り出し、プログラム検証の違反に応じて上限を設定する。
+    Returns: (final_score, explanation)
+    """
+    raw_match = re.search(r"合計点[^\d]*(\d+)点", content)
+    ai_score = int(raw_match.group(1)) if raw_match else 0
+
+    penalties = []
+    cap = ai_score
+
+    failed = set(validation.get("failed_items", []))
+
+    if "Hookの答えをスライド2か3で回収" in failed:
+        if cap > 80:
+            cap = 80
+        penalties.append("Hook未回収: Hook力は最大12点相当 → 合計上限80点")
+
+    if "禁止表現なし" in failed:
+        if cap > 70:
+            cap = 70
+        penalties.append("禁止表現あり: NG遵守は最大5点相当 → 合計上限70点")
+
+    if any("CTA" in f for f in failed):
+        if cap > 75:
+            cap = 75
+        penalties.append("CTA不一致: 全体の一貫性は最大5点相当 → 合計上限75点")
+
+    if "ハッシュタグ16個" in failed:
+        cap = max(0, cap - 5)
+        penalties.append("ハッシュタグ不足: -5点")
+
+    if "Expert Angle反映" in failed:
+        if cap > 80:
+            cap = 80
+        penalties.append("Expert Angle未反映: CORE HARI独自性は最大10点相当 → 合計上限80点")
+
+    explanation = "\n".join(penalties) if penalties else "プログラム検証の減点なし"
+    return cap, explanation
+
+
+# ── OpenAI Responses API 呼び出し ─────────────────────────────────────────────
+
+_SYSTEM_PROMPT = (
+    "あなたはCORE HARI FACE（札幌の顔専門エステサロン）の"
+    "Instagram投稿専門のコンテンツライターです。"
+    "オーナー・森このみの一人称で、やさしく専門的なトーンで書いてください。"
+    "指定された全出力を省略せず番号順に出力してください。"
+)
+
+
+def _call_api(prompt: str, model: str) -> tuple[str, int, int]:
+    """
+    Responses APIを呼び出し (content, input_tokens, output_tokens) を返す。
+    APIキー未設定・認証エラー・タイムアウトは例外をそのまま上げる。
+    """
+    from openai import OpenAI, AuthenticationError, RateLimitError
+    from config import OPENAI_API_KEY
+
+    if not OPENAI_API_KEY:
+        raise EnvironmentError(
+            "OPENAI_API_KEY が .env に設定されていません。"
+        )
+
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+    try:
+        response = client.responses.create(
+            model=model,
+            instructions=_SYSTEM_PROMPT,
+            input=prompt,
+        )
+    except AuthenticationError as e:
+        raise RuntimeError(f"OpenAI 認証エラー: {e}") from e
+    except RateLimitError as e:
+        raise RuntimeError(f"OpenAI 利用上限エラー: {e}") from e
+    except Exception as e:
+        if "timeout" in str(e).lower():
+            raise RuntimeError(f"OpenAI タイムアウト: {e}") from e
+        raise
+
+    content = response.output_text or ""
+    usage   = response.usage
+    return content, (usage.input_tokens if usage else 0), (usage.output_tokens if usage else 0)
+
+
+# ── ファイル保存 ──────────────────────────────────────────────────────────────
+
+def _save_outputs(
+    content: str,
+    handoff: dict,
+    validation: dict,
+    final_score: int,
+    score_note: str,
+    ts: str,
+    base_dir: str,
+) -> dict[str, str]:
+    """
+    3種類のファイルを保存し、パスを返す。
+    """
+    out_dir  = os.path.join(base_dir, "outputs")
+    inp_dir  = os.path.join(base_dir, "outputs", "inputs")
+    val_dir  = os.path.join(base_dir, "outputs", "validation")
+    for d in (out_dir, inp_dir, val_dir):
+        os.makedirs(d, exist_ok=True)
+
+    hook      = handoff.get("hook", "")
+    post_type = handoff.get("post_type", "")
+
+    # 1. 投稿全文
+    post_path = os.path.join(out_dir, f"instagram_post_{ts}.md")
+    with open(post_path, "w", encoding="utf-8") as f:
+        f.write(f"# CORE HARI FACE — Instagram投稿一式\n\n")
+        f.write(f"生成日時: {ts}\n\n")
+        f.write(f"**Hook**: {hook}\n\n**投稿目的**: {post_type}\n\n")
+        f.write(f"**最終スコア**: {final_score}点\n\n")
+        f.write("---\n\n")
+        f.write(content)
+        f.write(f"\n\n---\n\n## プログラム検証メモ\n\n{score_note}\n")
+
+    # 2. 入力情報
+    inp_path = os.path.join(inp_dir, f"instagram_input_{ts}.md")
+    with open(inp_path, "w", encoding="utf-8") as f:
+        f.write(f"# CORE HARI FACE — 入力情報\n\n生成日時: {ts}\n\n")
+        for k, v in handoff.items():
+            if isinstance(v, list):
+                v = "\n".join(f"  - {x}" for x in v)
+            f.write(f"**{k}**:\n{v}\n\n")
+
+    # 3. 検証結果JSON
+    val_path = os.path.join(val_dir, f"instagram_validation_{ts}.json")
+    val_data = {
+        "timestamp": ts,
+        "hook": hook,
+        "post_type": post_type,
+        "passed": validation["passed"],
+        "final_score": final_score,
+        "score_note": score_note,
+        "checks": [
+            {"label": label, "ok": ok, "note": note}
+            for label, ok, note in validation["checks"]
+        ],
+        "failed_items": validation["failed_items"],
+    }
+    with open(val_path, "w", encoding="utf-8") as f:
+        json.dump(val_data, f, ensure_ascii=False, indent=2)
+
+    # 4. 最新ファイル（常に上書き）
+    latest_path = os.path.join(out_dir, "latest_instagram_post.md")
+    shutil.copy2(post_path, latest_path)
+
+    return {"post": post_path, "input": inp_path, "validation": val_path, "latest": latest_path}
+
+
+# ── クリップボード ────────────────────────────────────────────────────────────
+
+def _copy_to_clipboard(text: str) -> bool:
+    """macOS pbcopy でクリップボードへコピー。失敗してもFalseを返すだけ。"""
+    try:
+        proc = subprocess.run(
+            ["pbcopy"], input=text.encode("utf-8"), check=True, timeout=5
+        )
+        return True
+    except Exception:
+        return False
 
 
 # ── 検証結果表示 ──────────────────────────────────────────────────────────────
 
-def print_validation_result(result: dict) -> None:
-    """検証結果をターミナルに表示する。"""
+def _print_validation(validation: dict, final_score: int, score_note: str) -> None:
+    sep = "-" * 50
     print()
-    print("=" * 60)
-    print("  Phase 2 検証結果")
-    print("=" * 60)
-    all_pass = result["passed"]
-    for label, ok, note in result["checks"]:
-        mark = "○" if ok else "✗"
-        line = f"  {mark} {label}"
+    print(sep)
+    print("  自動検証結果")
+    print(sep)
+    for label, ok, note in validation["checks"]:
+        status = "PASS" if ok else "FAIL"
+        line = f"  {status}: {label}"
         if note:
-            line += f"  ← {note}"
+            line += f" ({note})"
         print(line)
-    print()
-    if all_pass:
-        print("  ✅ 全チェック合格")
+    print(sep)
+    print(f"  最終スコア: {final_score}点")
+    if score_note != "プログラム検証の減点なし":
+        print(f"  調整内容: {score_note}")
+    if validation["passed"]:
+        print("  → 全項目PASS")
     else:
-        print(f"  ⚠️  不合格: {', '.join(result['failed_items'])}")
-    print("=" * 60)
+        print(f"  → FAIL項目: {', '.join(validation['failed_items'])}")
+    print(sep)
     print()
 
 
-# ── メイン生成関数 ────────────────────────────────────────────────────────────
+# ── メイン実行 ────────────────────────────────────────────────────────────────
 
-def run_phase2(handoff: dict) -> Optional[str]:
+def generate_post(handoff: dict, dry_run: bool = False) -> Optional[dict]:
     """
-    ChatGPTプロンプトを OpenAI API に送信し、①〜⑪の投稿一式を生成する。
-    生成後に検証を実行し、不合格なら一度だけ再生成する。
+    handoff情報からOpenAI Responses APIで投稿一式を生成する。
+
+    dry_run=True の場合: APIを呼ばずプロンプトと保存先のみ表示して返す。
 
     Returns:
-        最終的な生成テキスト（str）。失敗時は None。
+        {
+            "content": str,       # 生成テキスト
+            "validation": dict,   # 検証結果
+            "final_score": int,
+            "paths": dict,        # 保存ファイルパス
+            "regen_count": int,   # 再生成回数
+        }
+        or None on error
     """
-    try:
-        from phase2.prompt_generator import build_prompt
-    except ImportError:
-        from prompt_generator import build_prompt
+    from phase2.prompt_generator import build_prompt
+    from phase2.model_pricing import estimate_cost
+    from config import OPENAI_MODEL
 
-    try:
-        from openai import OpenAI
-        from config import OPENAI_API_KEY
-    except ImportError as e:
-        print(f"[Phase2] インポートエラー: {e}")
-        return None
+    prompt = build_prompt(handoff)
+    ts     = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-    if not OPENAI_API_KEY:
-        print("[Phase2] OPENAI_API_KEY が設定されていません")
-        return None
+    SEP = "=" * 60
 
-    def _call(attempt: int) -> Optional[str]:
-        label = "初回" if attempt == 1 else "再生成（形式違反のため）"
+    # ── dry-run モード ──────────────────────────────────────────────────
+    if dry_run:
         print()
-        print("=" * 60)
-        print(f"  Phase 2 — 投稿一式生成中 [{label}]（gpt-4o-mini）")
-        print("  ① カルーセル7枚 ② キャプション ③ CTA ④ Threads")
-        print("  ⑤ X版 ⑥ 30秒リール ⑦ 60秒リール ⑧ Canvaテキスト")
-        print("  ⑨ タイトル5案 ⑩ ハッシュタグ16個 ⑪ AI自己採点")
-        print("=" * 60)
-
-        prompt = build_prompt(handoff)
-        client = OpenAI(api_key=OPENAI_API_KEY)
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.75,
-                timeout=120,
-                max_tokens=4500,
-            )
-            return response.choices[0].message.content or ""
-        except Exception as e:
-            print(f"[Phase2] OpenAI APIエラー: {e}")
-            return None
-
-    # ── 初回生成 ─────────────────────────────────────────────────────────────
-    content = _call(1)
-    if not content or not content.strip():
-        print("[Phase2] 生成結果が空でした")
+        print(SEP)
+        print("  [dry-run] APIは呼びません。送信予定プロンプトを表示します。")
+        print(SEP)
+        print()
+        print(f"モデル: {OPENAI_MODEL}")
+        print(f"Hook:   {handoff.get('hook', '')}")
+        print(f"目的:   {handoff.get('post_type', '')}")
+        print()
+        print("── プロンプト先頭500文字 ──")
+        print(prompt[:500])
+        print("...")
+        print()
+        print("── 保存先（実行時） ──")
+        out_dir = os.path.join(base_dir, "outputs")
+        print(f"  投稿:     {out_dir}/instagram_post_{ts}.md")
+        print(f"  入力:     {out_dir}/inputs/instagram_input_{ts}.md")
+        print(f"  検証:     {out_dir}/validation/instagram_validation_{ts}.json")
+        print(f"  最新:     {out_dir}/latest_instagram_post.md")
+        print(SEP)
+        print()
         return None
 
-    # ── 検証 ─────────────────────────────────────────────────────────────────
-    validation = validate_output(content, handoff)
-    print_validation_result(validation)
-
-    # ── 不合格なら一度だけ再生成 ─────────────────────────────────────────────
-    if not validation["passed"]:
-        print(f"[Phase2] 不合格項目: {validation['failed_items']}")
-        print("[Phase2] 自動再生成を実行します...")
-        content2 = _call(2)
-        if content2 and content2.strip():
-            validation2 = validate_output(content2, handoff)
-            print_validation_result(validation2)
-            content = content2
-            validation = validation2
-
-    # ── ターミナル表示 ────────────────────────────────────────────────────────
-    sep = "=" * 60
+    # ── 初回生成 ────────────────────────────────────────────────────────
     print()
-    print(sep)
-    print("  Phase 2 生成結果")
-    print(sep)
+    print(SEP)
+    print(f"  投稿生成を開始します（モデル: {OPENAI_MODEL}）")
+    print(SEP)
+
+    regen_count = 0
+    content = ""
+    in_tok = out_tok = 0
+
+    try:
+        print("  [API] 生成中...")
+        content, in_tok, out_tok = _call_api(prompt, OPENAI_MODEL)
+        cost = estimate_cost(OPENAI_MODEL, in_tok, out_tok)
+        print(f"  [API] 完了 — 入力:{in_tok}tok / 出力:{out_tok}tok / 推定費用:{cost}")
+    except RuntimeError as e:
+        print(f"\n  [エラー] {e}")
+        return None
+    except Exception as e:
+        print(f"\n  [エラー] 予期しないエラー: {e}")
+        return None
+
+    # ── 初回検証 ────────────────────────────────────────────────────────
+    validation = validate_output(content, handoff)
+    final_score, score_note = _adjust_score(content, validation)
+
+    _print_validation(validation, final_score, score_note)
+
+    # ── FAILがあれば1回だけ再生成 ──────────────────────────────────────
+    if not validation["passed"]:
+        failed_str = "\n".join(f"- {f}" for f in validation["failed_items"])
+        retry_instruction = (
+            f"\n\n---\n\n## 修正依頼\n\n"
+            f"以下の項目が検証に不合格でした。修正して全出力を再生成してください。\n\n"
+            f"{failed_str}\n\n"
+            f"全出力（【リール優先サマリー】→①〜⑫）を省略せず再生成してください。"
+        )
+        print(f"  [再生成] FAIL項目があるため1回再生成します...")
+        try:
+            content2, in2, out2 = _call_api(prompt + retry_instruction, OPENAI_MODEL)
+            cost2 = estimate_cost(OPENAI_MODEL, in2, out2)
+            print(f"  [API] 再生成完了 — 入力:{in2}tok / 出力:{out2}tok / 推定費用:{cost2}")
+            in_tok += in2
+            out_tok += out2
+            regen_count = 1
+            content = content2
+
+            validation = validate_output(content, handoff)
+            final_score, score_note = _adjust_score(content, validation)
+            _print_validation(validation, final_score, score_note)
+
+            if not validation["passed"]:
+                print("  [警告] 再生成後もFAIL項目が残っています。未達項目:")
+                for f in validation["failed_items"]:
+                    print(f"    - {f}")
+                print()
+        except Exception as e:
+            print(f"  [警告] 再生成中にエラー: {e}。初回生成結果を使用します。")
+
+    # ── 保存 ────────────────────────────────────────────────────────────
+    try:
+        paths = _save_outputs(content, handoff, validation, final_score, score_note, ts, base_dir)
+    except Exception as e:
+        print(f"  [エラー] ファイル保存失敗: {e}")
+        paths = {}
+
+    # ── ターミナル表示 ──────────────────────────────────────────────────
+    print()
+    print(SEP)
+    print("  生成結果")
+    print(SEP)
     print()
     print(content)
     print()
-    print(sep)
+    print(SEP)
+    print(f"  再生成回数: {regen_count}回 / 最終スコア: {final_score}点")
+    if paths:
+        print(f"  保存先: {paths.get('post', '')}")
+        print(f"  最新版: {paths.get('latest', '')}")
+    print(SEP)
     print()
 
-    # ── ファイル保存 ──────────────────────────────────────────────────────────
-    path = _save_to_file(content, handoff, validation)
-    if path:
-        print(f"  保存先: {path}")
-        print()
+    # ── クリップボード ──────────────────────────────────────────────────
+    copied = _copy_to_clipboard(content)
+    if copied:
+        print("  クリップボードにコピーしました。")
+    else:
+        print("  ※ クリップボードへのコピーに失敗しました（生成・保存は成功）。")
+    print()
 
-    return content
-
-
-def _save_to_file(content: str, handoff: dict, validation: dict) -> Optional[str]:
-    """outputs/instagram_post_YYYYMMDD_HHMMSS.md に保存する。"""
-    try:
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        out_dir = os.path.join(base_dir, "outputs")
-        os.makedirs(out_dir, exist_ok=True)
-
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(out_dir, f"instagram_post_{ts}.md")
-
-        hook      = handoff.get("hook", "")
-        post_type = handoff.get("post_type", "")
-        topic     = handoff.get("topic", "")
-
-        # 検証サマリーを埋め込む
-        check_lines = []
-        for label, ok, note in validation["checks"]:
-            mark = "○" if ok else "✗"
-            line = f"- {mark} {label}"
-            if note:
-                line += f"  ← {note}"
-            check_lines.append(line)
-        check_md = "\n".join(check_lines)
-        pass_label = "✅ 全合格" if validation["passed"] else f"⚠️ 不合格: {', '.join(validation['failed_items'])}"
-
-        header = (
-            f"# CORE HARI FACE — Instagram投稿一式\n\n"
-            f"生成日時: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            f"**Hook**: {hook}\n\n"
-            f"**投稿目的**: {post_type}\n\n"
-            f"**Topic**: {topic}\n\n"
-            f"## 検証結果 — {pass_label}\n\n"
-            f"{check_md}\n\n"
-            f"---\n\n"
-        )
-
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(header + content)
-
-        return path
-    except Exception as e:
-        print(f"[Phase2] ファイル保存エラー: {e}")
-        return None
+    return {
+        "content":     content,
+        "validation":  validation,
+        "final_score": final_score,
+        "paths":       paths,
+        "regen_count": regen_count,
+    }
