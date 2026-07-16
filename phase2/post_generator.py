@@ -770,6 +770,54 @@ def _user_friendly_error(error: Exception, base_dir: str) -> None:
 
 # ── ターミナル表示 ────────────────────────────────────────────────────────────
 
+def _print_sheet_result(
+    ok: bool,
+    row: int,
+    hook: str,
+    status: str,
+    reason: str,
+    post_path: str,
+) -> None:
+    """Sheets 保存結果をターミナルへ表示する。欠損値があっても例外を出さない。"""
+    try:
+        if ok:
+            row_disp  = f"{row}行目" if row and row > 0 else "（スキップ: 重複）"
+            hook_disp = (hook or "")[:30] + ("..." if len(hook or "") > 30 else "")
+            print(f"  Googleスプレッドシート保存：成功")
+            print(f"  シート：reel_scripts  追加行：{row_disp}")
+            print(f"  Hook：{hook_disp}  ステータス：{status or ''}")
+        else:
+            post_basename = os.path.basename(post_path) if post_path else "（なし）"
+            print(f"  Googleスプレッドシート保存：失敗")
+            print(f"  Markdown保存：成功  ファイル：{post_basename}")
+            print(f"  原因：{reason or '不明'}")
+            if "GOOGLE_SHEET_ID" in (reason or "") or "設定されていません" in (reason or ""):
+                print("  次にすること：.env の GOOGLE_SHEET_ID を確認してください。")
+            elif "認証" in (reason or "") or "credential" in (reason or "").lower():
+                print("  次にすること：GOOGLE_SERVICE_ACCOUNT_JSON の設定を確認してください。")
+            else:
+                print("  次にすること：outputs/logs/error_*.log を確認してください。")
+    except Exception as e:
+        print(f"  [WARNING] スプレッドシート保存結果の表示に失敗しました: {e}")
+    print()
+
+
+def _open_sheet_url() -> None:
+    """GOOGLE_SHEET_ID をもとにブラウザでスプレッドシートを開く。失敗しても無視。"""
+    try:
+        from config import GOOGLE_SHEET_ID
+        if not GOOGLE_SHEET_ID:
+            return
+        url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}"
+        subprocess.Popen(
+            ["open", url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
 def _print_concise_summary(
     handoff: dict,
     status: str,
@@ -956,18 +1004,25 @@ def generate_post(handoff: dict, dry_run: bool = False) -> Optional[dict]:
         opened = _open_markdown(latest)
 
     # ── Sheets 保存結果をターミナルへ表示 ────────────────────────────
-    _print_sheet_result(
-        ok=sheet_ok,
-        row=sheet_row,
-        hook=handoff.get("hook", ""),
-        status=sheet_entry.get("status", "") if sheet_ok else "生成失敗",
-        reason=sheet_fail_reason,
-        post_path=paths.get("post", ""),
-    )
+    try:
+        _print_sheet_result(
+            ok=sheet_ok,
+            row=sheet_row,
+            hook=handoff.get("hook", ""),
+            status=sheet_entry.get("status", "") if sheet_ok else "生成失敗",
+            reason=sheet_fail_reason,
+            post_path=paths.get("post", ""),
+        )
+    except Exception as e:
+        print(f"  [WARNING] 保存結果表示エラー: {e}")
+        print()
 
     # ── Sheets の URL をブラウザで開く（保存成功時） ──────────────
     if sheet_ok and sheet_row > 0:
-        _open_sheet_url()
+        try:
+            _open_sheet_url()
+        except Exception:
+            pass
 
     # ── Instagram編集長レビュー（1回のAPIコール）─────────────────────
     editor_review = ""
