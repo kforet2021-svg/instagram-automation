@@ -364,16 +364,27 @@ REEL_SCRIPTS_HEADERS = [
     "validation_warning",  # 25
     "validation_fail",     # 26
     "output_file",         # 27
-    "posted",              # 28
-    "posted_at",           # 29
-    "instagram_url",       # 30
-    "views",               # 31
-    "likes",               # 32
-    "comments",            # 33
-    "saves",               # 34
-    "shares",              # 35
-    "follows",             # 36
-    "notes",               # 37
+    "reference_post_1",    # 28
+    "reference_type_1",    # 29
+    "reference_reason_1",  # 30
+    "reference_post_2",    # 31
+    "reference_type_2",    # 32
+    "reference_reason_2",  # 33
+    "reference_post_3",    # 34
+    "reference_type_3",    # 35
+    "reference_reason_3",  # 36
+    "corehari_changes",    # 37
+    "editor_comment",      # 38
+    "posted",              # 39
+    "posted_at",           # 40
+    "instagram_url",       # 41
+    "views",               # 42
+    "likes",               # 43
+    "comments",            # 44
+    "saves",               # 45
+    "shares",              # 46
+    "follows",             # 47
+    "notes",               # 48
 ]
 
 RANK_TOP_N = 20

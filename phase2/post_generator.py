@@ -54,7 +54,7 @@ def _extract_section(content: str, marker: str) -> str:
     start = content.find(marker)
     if start == -1:
         return ""
-    all_markers = list("①②③④⑤⑥⑦⑧⑨⑩⑪⑫") + ["【リール優先サマリー】"]
+    all_markers = list("①②③④⑤⑥⑦⑧⑨⑩⑪⑫") + ["【リール優先サマリー】", "【編集メモ】"]
     next_pos = len(content)
     for m in all_markers:
         if m == marker:
@@ -79,6 +79,136 @@ def _extract_reel_field(reel_summary: str, keyword: str) -> str:
     next_header = reel_summary.find("\n**", eol)
     end = next_header if next_header != -1 else len(reel_summary)
     return reel_summary[eol:end].strip()
+
+
+def _extract_editor_memo(content: str) -> dict:
+    """
+    【編集メモ】セクションからフィールドを抽出する。
+
+    Returns dict with keys:
+      theme, post_purpose, hook,
+      ref_post_1/2/3, ref_type_1/2/3, ref_reason_1/2/3,
+      corehari_changes, editor_comment
+    """
+    memo_text = _extract_section(content, "【編集メモ】")
+    if not memo_text:
+        return {}
+
+    def _field(label: str) -> str:
+        """**label:** の後ろのテキストを次の **...:** まで取得する。"""
+        idx = memo_text.find(f"**{label}:")
+        if idx == -1:
+            idx = memo_text.find(f"**{label}**")
+        if idx == -1:
+            return ""
+        eol = memo_text.find("\n", idx)
+        if eol == -1:
+            return ""
+        # inline value（同一行に値がある場合）
+        inline = memo_text[idx:eol].split(":", 1)
+        inline_val = inline[1].strip().strip("*") if len(inline) > 1 else ""
+        # multiline: 次の ** ヘッダーまで
+        nxt = memo_text.find("\n**", eol)
+        block = memo_text[eol: nxt if nxt != -1 else len(memo_text)].strip()
+        return block if block else inline_val
+
+    def _ref_block(n: int) -> tuple[str, str, str]:
+        """参考Nブロックから URL / 参考にした部分 / 採用理由 を返す。"""
+        tag = f"参考{n}:"
+        idx = memo_text.find(tag)
+        if idx == -1:
+            return "", "", ""
+        nxt_ref = len(memo_text)
+        for nn in range(1, 4):
+            if nn == n:
+                continue
+            p = memo_text.find(f"参考{nn}:", idx + 1)
+            if 0 < p < nxt_ref:
+                nxt_ref = p
+        # also stop at 変更した点
+        p2 = memo_text.find("**CORE HARI", idx + 1)
+        if 0 < p2 < nxt_ref:
+            nxt_ref = p2
+        block = memo_text[idx:nxt_ref]
+
+        def _line(label: str) -> str:
+            m = re.search(rf"-\s*{re.escape(label)}[:：]\s*(.*)", block)
+            return m.group(1).strip() if m else ""
+
+        url    = _line("URL")
+        rtype  = _line("参考にした部分")
+        reason = _line("採用理由")
+        if url in ("なし", "（なし）", ""):
+            return "", rtype, reason
+        return url, rtype, reason
+
+    url1, type1, reason1 = _ref_block(1)
+    url2, type2, reason2 = _ref_block(2)
+    url3, type3, reason3 = _ref_block(3)
+
+    # CORE HARI変更点
+    changes_idx = memo_text.find("**CORE HARIへ変更した点")
+    comment_idx = memo_text.find("**AI編集長コメント")
+    if changes_idx != -1:
+        changes_end = comment_idx if comment_idx > changes_idx else len(memo_text)
+        changes_block = memo_text[changes_idx:changes_end]
+        changes_block = re.sub(r"\*\*CORE HARIへ変更した点[^\n]*\n", "", changes_block)
+        changes = changes_block.strip()
+    else:
+        changes = ""
+
+    # AI編集長コメント
+    if comment_idx != -1:
+        comment_line = memo_text[comment_idx:]
+        comment_line = re.sub(r"\*\*AI編集長コメント[^\n]*\n", "", comment_line)
+        editor_comment = comment_line.strip()
+    else:
+        editor_comment = ""
+
+    return {
+        "theme":          _field("今日のテーマ"),
+        "post_purpose":   _field("投稿目的"),
+        "hook":           _field("選択Hook"),
+        "ref_post_1":     url1,
+        "ref_type_1":     type1,
+        "ref_reason_1":   reason1,
+        "ref_post_2":     url2,
+        "ref_type_2":     type2,
+        "ref_reason_2":   reason2,
+        "ref_post_3":     url3,
+        "ref_type_3":     type3,
+        "ref_reason_3":   reason3,
+        "corehari_changes": changes,
+        "editor_comment":   editor_comment,
+    }
+
+
+def _build_editor_memo_md(content: str, handoff: dict) -> str:
+    """
+    Markdownに挿入する「編集メモ」ブロックを構築する。
+    AIが【編集メモ】を出力していれば使い、なければhandoffから最低限の情報で組み立てる。
+    """
+    raw = _extract_section(content, "【編集メモ】")
+    if raw and len(raw) > 100:
+        # AIが出力した内容をそのまま使う（先頭の見出し行を含む）
+        return raw.strip()
+
+    # フォールバック: handoffから構築
+    hook      = handoff.get("hook", "")
+    post_type = handoff.get("post_type", "")
+    topic     = handoff.get("topic", "")
+    lines = [
+        "【編集メモ】",
+        "",
+        f"**今日のテーマ:** {topic}",
+        f"**投稿目的:** {post_type}",
+        f"**選択Hook:** {hook}",
+        "",
+        "**参考投稿:** （AI出力なし）",
+        "**CORE HARIへ変更した点:** （AI出力なし）",
+        "**AI編集長コメント:** （AI出力なし）",
+    ]
+    return "\n".join(lines)
 
 
 def _extract_caption_plain(content: str) -> str:
@@ -174,9 +304,10 @@ def _build_reel_script_entry(
     reel_scripts シートへ保存する1行分のデータを構築する。
     status: "投稿OK" | "要修正"
     """
-    reel_summary = _extract_section(content, "【リール優先サマリー】")
-    thumb = _extract_thumbnail_fields(content)
+    reel_summary  = _extract_section(content, "【リール優先サマリー】")
+    thumb         = _extract_thumbnail_fields(content)
     expert_angles = handoff.get("expert_angles", [])
+    memo          = _extract_editor_memo(content)
 
     return {
         "generated_at":          datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -206,6 +337,17 @@ def _build_reel_script_entry(
         "validation_warning":    "",
         "validation_fail":       "",
         "output_file":           os.path.basename(post_path) if post_path else "",
+        "reference_post_1":      memo.get("ref_post_1", ""),
+        "reference_type_1":      memo.get("ref_type_1", ""),
+        "reference_reason_1":    memo.get("ref_reason_1", ""),
+        "reference_post_2":      memo.get("ref_post_2", ""),
+        "reference_type_2":      memo.get("ref_type_2", ""),
+        "reference_reason_2":    memo.get("ref_reason_2", ""),
+        "reference_post_3":      memo.get("ref_post_3", ""),
+        "reference_type_3":      memo.get("ref_type_3", ""),
+        "reference_reason_3":    memo.get("ref_reason_3", ""),
+        "corehari_changes":      memo.get("corehari_changes", ""),
+        "editor_comment":        memo.get("editor_comment", ""),
         "posted":                "未投稿",
         "posted_at":             "",
         "instagram_url":         "",
@@ -221,10 +363,12 @@ def _build_reel_script_entry(
 
 def _build_today_section(content: str, handoff: dict, ts: str) -> str:
     """
-    Markdownの先頭に置く「今日使うもの」セクションを構築する。
+    Markdownの先頭に置くセクションを構築する。
 
-    順序: サムネイル → 冒頭3秒テロップ → 30秒リール台本 → キャプション → CTA
-    その後: Threads / X / カルーセル / ハッシュタグ（参考）
+    構成:
+      【編集メモ】（AIが生成した参考投稿・変更点・コメント）
+      # 今日使うもの: サムネイル→冒頭3秒→30秒台本→キャプション→CTA
+      参考: Threads / X / カルーセル / ハッシュタグ
     """
     hook      = handoff.get("hook", "")
     post_type = handoff.get("post_type", "")
@@ -244,7 +388,14 @@ def _build_today_section(content: str, handoff: dict, ts: str) -> str:
     carousel_text = re.sub(r"^.*①[^\n]*\n", "", _extract_section(content, "①"), flags=re.MULTILINE).strip()
     hashtag_text  = re.sub(r"^.*⑩[^\n]*\n", "", _extract_section(content, "⑩"), flags=re.MULTILINE).strip()
 
+    # 編集メモ
+    editor_memo_md = _build_editor_memo_md(content, handoff)
+
     lines = [
+        editor_memo_md,
+        "",
+        "---",
+        "",
         "# 今日使うもの",
         "",
         f"> **Hook**: {hook}",
