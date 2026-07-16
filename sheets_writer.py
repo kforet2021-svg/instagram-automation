@@ -1676,10 +1676,14 @@ def save_reel_script(entry: dict) -> int:
     global _reel_scripts_sheet_formatted
     worksheet = _get_or_create_worksheet(SHEET_REEL_SCRIPTS, REEL_SCRIPTS_HEADERS)
 
-    # 初回のみ: 1行目を固定
+    # 初回のみ: 1行目を固定 + フィルター設定
     if not _reel_scripts_sheet_formatted:
         try:
             worksheet.freeze(rows=1)
+        except Exception:
+            pass
+        try:
+            worksheet.set_basic_filter()
         except Exception:
             pass
         _reel_scripts_sheet_formatted = True
