@@ -947,7 +947,7 @@ def extract_observations_only(qa_pairs: list) -> dict:
 _TOPIC_CANDIDATES_SYSTEM = (
     "あなたはCreator Intelligence PlatformのHook Intelligence Engineです。\n"
     "Instagram・Threadsのトレンド × World Context × ブランド専門領域から\n"
-    "「スクロールが止まるHook文」を10案生成します。\n\n"
+    "「今日投稿する価値があるHook文」を3案（質優先）生成します。\n\n"
 
     "【Hook生成の手順 — 必ずこの順序で考える】\n"
     "  Step1. Topic（小さい粒度の悩み・事実）を決める\n"
@@ -990,14 +990,33 @@ _TOPIC_CANDIDATES_SYSTEM = (
     "  デコルテ・首・目から入る紫外線・横向き寝・ゴースト血管・\n"
     "  交感神経・副交感神経・顔の使い方・笑い方・表情グセ\n\n"
 
-    "【多様性ルール — 10案全体で必ず守る】\n"
-    "  ① 同じ原因（冷房 / 紫外線 / 湿度 / 水分不足 / 睡眠 等）は最大2件まで。\n"
-    "     3件以上同じ原因を使うことは禁止。\n"
-    "  ② CORE HARI視点も分散させる。同じ視点は最大2件まで。\n"
-    "  ③ 以下のテーブルを目安に、できるだけ異なるテーマを選ぶ:\n"
+    "【3案の多様性ルール】\n"
+    "  ① 3案で同じ原因・同じCORE HARI視点を使わない。\n"
+    "  ② 3案でバラバラのテーマを選ぶ:\n"
     "       むくみ / 姿勢 / 首 / 舌 / 呼吸 / 咬筋 / 左右差 / 表情グセ /\n"
     "       乾燥 / 横向き寝 / 頭皮 / 噛み癖 / 目元 / デコルテ\n"
-    "  ④ 10案生成後に自己チェック: 重複テーマがあれば差し替えてから出力する。\n\n"
+    "  ③ 1位はおすすめ度★★★★★、2位★★★★☆、3位★★★☆☆で出力する。\n\n"
+
+    "【抽象表現禁止ルール — 最重要】\n"
+    "  Hookだけで「答え」が想像できるものにする。抽象フレーズで誤魔化さない。\n\n"
+    "  ✗ 禁止（答えが想像できない）:\n"
+    "    ✗ 「顔に出やすい癖があります」← 癖が何なのか分からない\n"
+    "    ✗ 「実はこれが原因です」← 指示語で誤魔化している\n"
+    "    ✗ 「知らない人が多いです」← 中身がない\n"
+    "    ✗ 「水分不足が続くと、実は顔に出やすい癖があります。」← 何の癖か不明\n\n"
+    "  ✅ 合格（読んだだけで答えのイメージがつく）:\n"
+    "    ○ 「顔がむくむ日に、私が最初に見る場所。」\n"
+    "    ○ 「むくみが気になる日に、マッサージより先に見る場所。」\n"
+    "    ○ 「横向き寝をしている人が、一度確認したいポイント。」\n"
+    "    ○ 「笑顔が疲れて見える人に共通する癖。」\n\n"
+
+    "【CORE HARIらしさ — 3案中少なくとも1案に含める】\n"
+    "  以下のいずれかのフレーズを使う:\n"
+    "    ・私はまず〇〇を見ます  ← 最優先（専門家目線が一番伝わる）\n"
+    "    ・顔ではなく〇〇を見る\n"
+    "    ・順番が逆です\n"
+    "    ・〇〇する前に確認してください\n"
+    "    ・毎日顔を見ていて気づいたことがあります\n\n"
 
     "【Step3 — 切り口と優先順位】\n"
     "  最優先: 意外性・ギャップ・勘違い・知らなかった・共通点\n"
@@ -1073,9 +1092,10 @@ _TOPIC_CANDIDATES_SYSTEM = (
     "  ・Instagram 1枚目 / Threads 1行目として使える一文\n"
     "  ・15〜35文字程度\n"
     "  ・単なる質問文（「〜していますか？」だけ）は禁止\n"
-    "  ・抽象フレーズだけで終わる（「共通点があります」のみ）は禁止\n\n"
+    "  ・抽象フレーズだけで終わる（「共通点があります」のみ）は禁止\n"
+    "  ・Hookだけで「答え」のイメージが湧くこと（抽象禁止）\n\n"
 
-    "回答は必ずJSON形式で。"
+    "回答は必ずJSON形式で。ちょうど3案のみ出力する。"
 )
 
 
@@ -1090,13 +1110,13 @@ def generate_topic_candidates_ai(
     hook_library_text: str = "",
 ) -> list:
     """
-    Instagram/Threadsトレンド × World Context × ブランド領域 → Hook候補10案（1コール）。
+    Instagram/Threadsトレンド × World Context × ブランド領域 → Hook候補3案・質優先（1コール）。
 
     Observationは任意。提供された場合はリアリティ補強として参照する。
     past_obs_library: 過去のObservationライブラリ（テキスト、任意）
 
-    戻り値: [{"hook": "...", "theme": "...", "stars": 5, ...}, ...]
-    失敗時は空リスト。
+    戻り値: [{"hook": "...", "stars": 5, "reason": "...", "target": "...", "post_format": "...", "purpose": "...", ...}, ...]
+    stars降順（1番目が★★★★★）。失敗時は空リスト。
     """
     season    = world_ctx.get("season", "")
     hot       = world_ctx.get("hot_tension", "")
@@ -1171,21 +1191,28 @@ def generate_topic_candidates_ai(
         "         ① 「えっ、どういうこと？」と思えるか → 思わなければ意外性不足\n"
         "         ② 「夏だから○○になる」のような弱い因果関係ではないか → あれば作り直す\n"
         "         ③ 「他の美容アカウントでも作れるか？」→ YESならStep2からやり直す\n"
-        "         ④ 「森このみ本人が言いそうか？」→ 言わなさそうならStep4からやり直す\n\n"
-        "  Step6. 多様性チェック（10案全体）:\n"
-        "         ・同じ原因（冷房/紫外線/湿度 等）が3件以上あれば1件に差し替える\n"
-        "         ・同じCORE HARI視点が3件以上あれば1件に差し替える\n"
+        "         ④ 「森このみ本人が言いそうか？」→ 言わなさそうならStep4からやり直す\n"
+        "         ⑤ Hookだけで「答え」のイメージが湧くか → 湧かなければ抽象表現禁止ルール違反\n\n"
+        "  Step6. CORE HARIらしさチェック:\n"
+        "         3案中少なくとも1案に「私はまず〇〇を見ます」等のCORE HARIフレーズを含める。\n"
+        "         含まれていなければStep4からやり直す。\n\n"
+        "  Step7. 多様性チェック（3案全体）:\n"
+        "         ・3案で同じ原因・同じCORE HARI視点が重複していれば差し替える\n"
         "         ・差し替え後にStep5を再実施してから出力する\n\n"
-        "ちょうど10案提案してください。\n\n"
+        "ちょうど3案（質優先）提案してください。1案目が最もおすすめ（★★★★★）。\n\n"
         "各Hookに:\n"
         "  hook        : Instagram1枚目/Threads1行目になる一文（15〜35文字）\n"
-        "                単なる質問文は禁止。「夏だから○○になる」は禁止。続きを読みたくなる一文。\n"
+        "                単なる質問文は禁止。抽象フレーズ禁止。Hookだけで答えのイメージが湧くこと。\n"
+        "  stars       : 5 / 4 / 3（1案目=5、2案目=4、3案目=3）\n"
+        "  reason      : なぜこのHookを選んだか（50文字以内）\n"
+        "  target      : 想定ターゲット（例: 30代・40代女性・むくみが気になり始めた方）\n"
+        "  post_format : 30秒リール / カルーセル / 60秒リール から1つ\n"
+        "  purpose     : 保存/共感/信頼/行動/予約 から1つ\n"
         "  perspective : 使ったCORE HARI視点（咬筋/首/表情グセ 等）\n"
         "  angle       : 使った切り口（〜な人へ/先にして 等）\n"
         "  theme       : 内部テーマ識別子（10文字以内）\n"
-        "  post_type   : 保存/共感/信頼/行動/Threads から1つ\n"
-        "  reason      : 選定理由（1〜2行）\n\n"
-        'JSON: {"candidates": [{"hook":"...","perspective":"...","angle":"...","theme":"...","post_type":"保存","reason":"..."}, ...]}'
+        "  post_type   : 保存/共感/信頼/行動/Threads から1つ（purposeと同値でよい）\n\n"
+        'JSON: {"candidates": [{"hook":"...","stars":5,"reason":"...","target":"...","post_format":"...","purpose":"...","perspective":"...","angle":"...","theme":"...","post_type":"共感"}, ...]}'
     )
 
     try:
@@ -1195,26 +1222,41 @@ def generate_topic_candidates_ai(
         data = _json.loads(raw)
         candidates = data.get("candidates", [])
         cleaned = []
+        _VALID_TYPES   = {"保存", "共感", "信頼", "行動", "Threads"}
+        _VALID_PURPOSE = {"保存", "共感", "信頼", "行動", "予約"}
+        _VALID_FORMAT  = {"30秒リール", "カルーセル", "60秒リール"}
         for item in candidates:
             hook  = str(item.get("hook",  "")).strip()
             theme = str(item.get("theme", "")).strip()
-            # hook が空なら theme を hook として使う（フォールバック）
             if not hook and not theme:
                 continue
             if not hook:
                 hook = theme
-            _VALID_TYPES = {"保存", "共感", "信頼", "行動", "Threads"}
             post_type = str(item.get("post_type", "")).strip()
             if post_type not in _VALID_TYPES:
                 post_type = "共感"
+            purpose = str(item.get("purpose", post_type)).strip()
+            if purpose not in _VALID_PURPOSE:
+                purpose = post_type if post_type in _VALID_PURPOSE else "共感"
+            post_format = str(item.get("post_format", "30秒リール")).strip()
+            if post_format not in _VALID_FORMAT:
+                post_format = "30秒リール"
+            try:
+                stars = int(item.get("stars", 5))
+            except (ValueError, TypeError):
+                stars = 5
             cleaned.append({
                 "hook":        hook,
+                "stars":       stars,
+                "reason":      str(item.get("reason", "")).strip(),
+                "target":      str(item.get("target", "")).strip(),
+                "post_format": post_format,
+                "purpose":     purpose,
                 "perspective": str(item.get("perspective", "")).strip(),
                 "angle":       str(item.get("angle", "")).strip(),
                 "theme":       theme or hook,
                 "post_type":   post_type,
                 "source":      str(item.get("source", "new")).strip(),
-                "reason":      str(item.get("reason", "")).strip(),
             })
         return cleaned
     except Exception as e:
