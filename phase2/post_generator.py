@@ -134,6 +134,129 @@ def _extract_thumbnail_plain(content: str) -> str:
     return _extract_reel_field(reel_summary, "おすすめサムネイル詳細")
 
 
+def _extract_60sec_reel_plain(content: str) -> str:
+    """⑦ 60秒リール台本を抽出（セクションヘッダー・文字数注記を除去）。"""
+    s7 = _extract_section(content, "⑦")
+    s7 = re.sub(r"^.*⑦[^\n]*\n", "", s7, flags=re.MULTILINE)
+    s7 = re.sub(r"（台本全文\d+文字）", "", s7)
+    return s7.strip()
+
+
+def _extract_hashtags_flat(content: str) -> str:
+    """⑩ のハッシュタグを重複排除・半角スペース区切りで返す（コピペ用）。
+    ### のような Markdown 記号は除外する。
+    """
+    s10 = _extract_section(content, "⑩")
+    tags = re.findall(r"#\S+", s10)
+    # 有効なハッシュタグ: # の次が # 以外の文字であること
+    valid = [t for t in tags if re.match(r"^#[^#]", t)]
+    return " ".join(dict.fromkeys(valid))
+
+
+def _extract_cta_all(content: str) -> str:
+    """③ CTA 3案全文を返す。"""
+    s3 = _extract_section(content, "③")
+    s3 = re.sub(r"^.*③[^\n]*\n", "", s3, flags=re.MULTILINE)
+    return s3.strip()
+
+
+def _extract_hook_answer(content: str) -> str:
+    """カルーセルのスライド2（Hook回答）の本文を返す。"""
+    s1 = _extract_section(content, "①")
+    m = re.search(r"スライド2【[\s\S]*?(?=スライド3【|$)", s1)
+    if not m:
+        return ""
+    text = re.sub(r"スライド2【[^】]*】[：:]?", "", m.group(0))
+    return text.strip()
+
+
+def _extract_thumbnail_fields(content: str) -> dict:
+    """⑫ の案1 テキスト・補足テキスト・クリックされる理由を返す。"""
+    s12 = _extract_section(content, "⑫")
+    m = re.search(r"\*\*案1[^*]*\*\*[:\s]*([\s\S]*?)(?=\*\*案2|\Z)", s12)
+    if not m:
+        return {"main": "", "sub": "", "reason": ""}
+    block = m.group(1)
+
+    def _field(label: str) -> str:
+        m2 = re.search(rf"[-・]?\s*{label}[:：]\s*(.+)", block)
+        return m2.group(1).strip() if m2 else ""
+
+    return {
+        "main":   _field("テキスト"),
+        "sub":    _field("補足テキスト"),
+        "reason": _field("クリックされる理由"),
+    }
+
+
+def _build_reel_script_entry(
+    content: str,
+    handoff: dict,
+    validation: dict,
+    final_score: int,
+    ts: str,
+    post_path: str,
+) -> dict:
+    """
+    reel_scripts シートへ保存する1行分のデータを構築する。
+    """
+    fail_count = len(validation.get("failed_items", []))
+    warn_count = len(validation.get("warning_items", []))
+    pass_count = len([s for _, s, _ in validation["checks"] if s == "PASS"])
+
+    # ステータス（FAILが0かつWARNINGが0のみ「投稿可能」）
+    if fail_count == 0 and warn_count == 0:
+        status = "投稿可能"
+    elif fail_count == 0:
+        status = "要確認"
+    else:
+        status = "修正必要"
+
+    reel_summary = _extract_section(content, "【リール優先サマリー】")
+    thumb = _extract_thumbnail_fields(content)
+    expert_angles = handoff.get("expert_angles", [])
+
+    return {
+        "generated_at":          datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "generation_id":         ts,
+        "status":                status,
+        "quality_score":         final_score,
+        "post_format":           _extract_reel_field(reel_summary, "今回おすすめの投稿形式"),
+        "post_purpose":          handoff.get("post_type", ""),
+        "topic":                 handoff.get("topic", ""),
+        "hook":                  handoff.get("hook", ""),
+        "hook_answer":           _extract_hook_answer(content),
+        "reality":               handoff.get("reality", ""),
+        "expert_angle":          "\n".join(expert_angles),
+        "thumbnail_main":        thumb["main"],
+        "thumbnail_sub":         thumb["sub"],
+        "thumbnail_reason":      thumb["reason"],
+        "thumbnail_composition": _extract_reel_field(reel_summary, "おすすめサムネイル詳細"),
+        "opening_3sec_text":     _extract_reel_field(reel_summary, "冒頭3秒テロップ"),
+        "reel_30sec_script":     _extract_reel_field(reel_summary, "30秒リール完成版"),
+        "reel_60sec_script":     _extract_60sec_reel_plain(content),
+        "shooting_composition":  _extract_reel_field(reel_summary, "撮影構図"),
+        "shooting_checklist":    _extract_reel_field(reel_summary, "撮影チェックリスト"),
+        "caption":               _extract_caption_plain(content),
+        "cta":                   _extract_cta_all(content),
+        "hashtags":              _extract_hashtags_flat(content),
+        "validation_pass":       pass_count,
+        "validation_warning":    warn_count,
+        "validation_fail":       fail_count,
+        "output_file":           os.path.basename(post_path) if post_path else "",
+        "posted":                "未投稿",
+        "posted_at":             "",
+        "instagram_url":         "",
+        "views":                 "",
+        "likes":                 "",
+        "comments":              "",
+        "saves":                 "",
+        "shares":                "",
+        "follows":               "",
+        "notes":                 "",
+    }
+
+
 def _build_today_section(content: str, handoff: dict, final_score: int, ts: str) -> str:
     """
     Markdownの先頭に置く「✅ 今日使う部分」セクションを構築する。
@@ -831,6 +954,51 @@ def _print_validation(validation: dict, final_score: int, score_note: str) -> No
     print()
 
 
+def _print_sheet_result(
+    ok: bool,
+    row: int,
+    hook: str,
+    status: str,
+    reason: str,
+    post_path: str,
+) -> None:
+    """Sheets 保存結果をターミナルへ表示する。"""
+    if ok:
+        row_disp = f"{row}行目" if row > 0 else "（スキップ: 重複）"
+        hook_disp = hook[:30] + "..." if len(hook) > 30 else hook
+        print(f"  Googleスプレッドシート保存：成功")
+        print(f"  シート：reel_scripts  追加行：{row_disp}")
+        print(f"  Hook：{hook_disp}  ステータス：{status}")
+    else:
+        post_basename = os.path.basename(post_path) if post_path else "（なし）"
+        print(f"  Googleスプレッドシート保存：失敗")
+        print(f"  Markdown保存：成功  ファイル：{post_basename}")
+        print(f"  原因：{reason or '不明'}")
+        if "GOOGLE_SHEET_ID" in reason or "設定されていません" in reason:
+            print("  次にすること：.env の GOOGLE_SHEET_ID を確認してください。")
+        elif "認証" in reason or "credential" in reason.lower():
+            print("  次にすること：GOOGLE_SERVICE_ACCOUNT_JSON の設定を確認してください。")
+        else:
+            print("  次にすること：outputs/logs/error_*.log を確認してください。")
+    print()
+
+
+def _open_sheet_url() -> None:
+    """GOOGLE_SHEET_ID をもとにブラウザでスプレッドシートを開く。失敗しても無視。"""
+    try:
+        from config import GOOGLE_SHEET_ID
+        if not GOOGLE_SHEET_ID:
+            return
+        url = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}"
+        subprocess.Popen(
+            ["open", url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
 def _print_concise_summary(
     handoff: dict,
     validation: dict,
@@ -1027,10 +1195,27 @@ def generate_post(handoff: dict, dry_run: bool = False) -> Optional[dict]:
     # ── 5ファイル存在確認 ────────────────────────────────────────────
     missing_files = _verify_latest_files(base_dir)
 
-    # ── キャプションをクリップボードへコピー（PASS/WARNINGのみ） ───
+    # ── Google Sheets へ保存 ──────────────────────────────────────
+    sheet_row  = 0
+    sheet_ok   = False
+    sheet_fail_reason = ""
+    if paths.get("post"):
+        try:
+            from sheets_writer import save_reel_script
+            sheet_entry = _build_reel_script_entry(
+                content, handoff, validation, final_score, ts, paths["post"]
+            )
+            sheet_row = save_reel_script(sheet_entry)
+            sheet_ok  = True
+        except Exception as e:
+            sheet_fail_reason = str(e)[:80]
+
+    # ── キャプションをクリップボードへコピー（投稿可能のみ） ─────
+    # 投稿可能 = FAIL 0 かつ WARNING 0
     copied = False
     fail_count = len(validation.get("failed_items", []))
-    if fail_count == 0 and paths.get("post"):
+    warn_count = len(validation.get("warning_items", []))
+    if fail_count == 0 and warn_count == 0 and paths.get("post"):
         caption = _extract_caption_plain(content)
         copied  = _copy_caption_to_clipboard(caption)
 
@@ -1039,6 +1224,20 @@ def generate_post(handoff: dict, dry_run: bool = False) -> Optional[dict]:
     latest = paths.get("latest")
     if latest and os.path.exists(latest):
         opened = _open_markdown(latest)
+
+    # ── Sheets 保存結果をターミナルへ表示 ────────────────────────────
+    _print_sheet_result(
+        ok=sheet_ok,
+        row=sheet_row,
+        hook=handoff.get("hook", ""),
+        status=sheet_entry.get("status", "") if sheet_ok else "生成失敗",
+        reason=sheet_fail_reason,
+        post_path=paths.get("post", ""),
+    )
+
+    # ── Sheets の URL をブラウザで開く（保存成功時） ──────────────
+    if sheet_ok and sheet_row > 0:
+        _open_sheet_url()
 
     # ── 完了音 ────────────────────────────────────────────────────────
     _play_sound(success=(fail_count == 0))

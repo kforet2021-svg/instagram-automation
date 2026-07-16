@@ -333,6 +333,48 @@ SHEET_EVIDENCE_LINKS = "evidence_links"
 SHEET_CORE_HARI_KB = "core_hari_kb"
 # 2026-07-02(10回目): Thought Library — 考え方・話し方・例え話のデータベース
 SHEET_THOUGHT_LIBRARY = "thought_library"
+# 2026-07-16: Phase2 投稿管理シート
+SHEET_REEL_SCRIPTS = "reel_scripts"
+
+REEL_SCRIPTS_HEADERS = [
+    "generated_at",        # 1
+    "generation_id",       # 2
+    "status",              # 3
+    "quality_score",       # 4
+    "post_format",         # 5
+    "post_purpose",        # 6
+    "topic",               # 7
+    "hook",                # 8
+    "hook_answer",         # 9
+    "reality",             # 10
+    "expert_angle",        # 11
+    "thumbnail_main",      # 12
+    "thumbnail_sub",       # 13
+    "thumbnail_reason",    # 14
+    "thumbnail_composition",  # 15
+    "opening_3sec_text",   # 16
+    "reel_30sec_script",   # 17
+    "reel_60sec_script",   # 18
+    "shooting_composition",# 19
+    "shooting_checklist",  # 20
+    "caption",             # 21
+    "cta",                 # 22
+    "hashtags",            # 23
+    "validation_pass",     # 24
+    "validation_warning",  # 25
+    "validation_fail",     # 26
+    "output_file",         # 27
+    "posted",              # 28
+    "posted_at",           # 29
+    "instagram_url",       # 30
+    "views",               # 31
+    "likes",               # 32
+    "comments",            # 33
+    "saves",               # 34
+    "shares",              # 35
+    "follows",             # 36
+    "notes",               # 37
+]
 
 RANK_TOP_N = 20
 
@@ -1616,6 +1658,51 @@ def save_research_sources(entries: list) -> None:
                 evidence.get("取得日", ""),
                 tag,
             ])
+
+
+_reel_scripts_sheet_formatted = False
+
+
+def save_reel_script(entry: dict) -> int:
+    """
+    Phase2 で生成した1投稿分のデータを reel_scripts シートへ保存する。
+    同じ generation_id が既に存在する場合は保存をスキップする（重複防止）。
+
+    Returns:
+        追加した行番号（1始まり）。スキップ時は -1。
+
+    【2026-07-16(1回目): 新規追加。Phase2 UX自動化対応。】
+    """
+    global _reel_scripts_sheet_formatted
+    worksheet = _get_or_create_worksheet(SHEET_REEL_SCRIPTS, REEL_SCRIPTS_HEADERS)
+
+    # 初回のみ: 1行目を固定
+    if not _reel_scripts_sheet_formatted:
+        try:
+            worksheet.freeze(rows=1)
+        except Exception:
+            pass
+        _reel_scripts_sheet_formatted = True
+
+    # 重複チェック: generation_id 列（B列 = col 2）を全取得
+    generation_id = str(entry.get("generation_id", ""))
+    existing_ids: list[str] = []
+    if generation_id:
+        existing_ids = worksheet.col_values(2)  # 行1=ヘッダー "generation_id" も含む
+        if generation_id in existing_ids:
+            return -1
+
+    row = [entry.get(h, "") for h in REEL_SCRIPTS_HEADERS]
+    worksheet.append_row(row, value_input_option="USER_ENTERED")
+
+    # 追加された行番号 = 元の行数 + 1 (既存 col_values が取れていれば使う)
+    if existing_ids:
+        return len(existing_ids) + 1
+    # フォールバック: 全行を再取得して行数を確認
+    try:
+        return len(worksheet.col_values(2))
+    except Exception:
+        return -1
 
     if rows:
         worksheet.append_rows(rows, value_input_option="USER_ENTERED")
