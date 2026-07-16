@@ -1264,3 +1264,38 @@ def generate_topic_candidates_ai(
         return []
 
 
+
+
+def review_post_as_editor(content: str, model: str = "gpt-4o-mini") -> str:
+    """
+    Instagram編集長として投稿がCORE HARIらしいかを1回のAPIコールで判定する。
+
+    Returns: 表示用テキスト（YES/NO + 理由 + 改善案1つ）。失敗時は空文字。
+    """
+    instructions = (
+        "あなたはInstagram編集長です。\n"
+        "CORE HARI FACEは札幌の顔専門エステサロンです。"
+        "小顔矯正・顔筋トレーニング・たるみ改善を専門とし、"
+        "施術者が顔を見ながら気づいたことをそのまま伝えるアカウントです。\n\n"
+        "この投稿はCORE HARIらしいですか？\n"
+        "YESまたはNOで答えてください。理由は100文字以内。\n"
+        "改善があるなら1つだけ提案してください。\n\n"
+        "形式:\n"
+        "判定: YES / NO\n"
+        "理由: （100文字以内）\n"
+        "改善提案: （あれば1文、なければ「なし」）"
+    )
+    try:
+        from openai import OpenAI
+        from config import OPENAI_API_KEY
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        # 長すぎる場合は先頭2000文字に絞る
+        excerpt = content[:2000]
+        resp = client.responses.create(
+            model=model,
+            instructions=instructions,
+            input=excerpt,
+        )
+        return (resp.output_text or "").strip()
+    except Exception as e:
+        return f"（編集長レビュー取得失敗: {str(e)[:60]}）"
