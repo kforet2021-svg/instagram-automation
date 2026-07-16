@@ -3169,22 +3169,17 @@ def print_phase1_summary(result: dict) -> None:
         c = reality.get("content", "")
         print(f"\n  【リアリティ】[{t}] {c[:50]}")
 
-    candidates = result.get("hook_candidates") or result.get("topic_candidates", [])
-    if candidates:
-        print(f"\n  【Hook候補 × {len(candidates)}案】")
-        _icons = {"保存": "📌", "共感": "💬", "信頼": "🔍", "行動": "✋", "Threads": "🧵"}
-        for i, c in enumerate(candidates, 1):
-            hook      = c.get("hook") or c.get("theme", "")
-            angle     = c.get("angle", "")
-            post_type = c.get("post_type", "")
-            icon      = _icons.get(post_type, "")
-            angle_tag = f" [{angle}]" if angle else ""
-            print(f"    [{i:2}] {icon}{angle_tag} 「{hook}」")
-
     selected = result.get("selected_topic")
     if selected:
+        from topic_intelligence import _print_hook_card, _STARS_LABEL  # noqa: PLC0415
         hook = selected.get("hook") or selected.get("theme", "")
-        print(f"\n  【選択Hook】「{hook}」")
+        stars = selected.get("stars", 5)
+        stars_label = _STARS_LABEL.get(stars, f"★×{stars}")
+        print(f"\n  【選択Hook】{stars_label}")
+        print(f"  「{hook}」")
+        reason = selected.get("reason", "")
+        if reason:
+            print(f"  理由: {reason}")
 
     print()
 

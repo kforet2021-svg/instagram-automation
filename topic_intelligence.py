@@ -350,13 +350,48 @@ _POST_TYPE_ICON = {
 }
 
 
+_STARS_LABEL = {5: "★★★★★（おすすめ）", 4: "★★★★☆", 3: "★★★☆☆"}
+
+
+def _print_hook_card(rank: int, c: dict) -> None:
+    """Hook 1案を整形して表示する。"""
+    W = 58
+    hook        = c.get("hook") or c.get("theme", "")
+    stars       = c.get("stars", 5 - (rank - 1))
+    reason      = c.get("reason", "")
+    target      = c.get("target", "")
+    post_format = c.get("post_format", "")
+    purpose     = c.get("purpose") or c.get("post_type", "")
+    perspective = c.get("perspective", "")
+    angle       = c.get("angle", "")
+
+    stars_label = _STARS_LABEL.get(stars, f"★×{stars}")
+    print()
+    print(f"  {rank}位  {stars_label}")
+    print(f"  「{hook}」")
+    print()
+    if reason:
+        import textwrap as _tw
+        for line in _tw.wrap(f"  なぜおすすめ: {reason}", width=W):
+            print(f"  {line.lstrip()}" if line.startswith("  ") else f"  {line}")
+    if target:
+        print(f"  想定ターゲット: {target}")
+    if post_format:
+        print(f"  投稿形式: {post_format}")
+    if purpose:
+        print(f"  目的: {purpose}")
+    if perspective:
+        extra = f"  [{perspective}]" + (f" / [{angle}]" if angle else "")
+        print(f"  CORE HARI視点:{extra}")
+
+
 def print_topic_candidates(candidates: list) -> None:
-    """Phase 1 出力。毎朝3分で「今日はこれにしよう」と選べる表示。"""
+    """Phase 1 出力。1位のHookだけ表示する（別案は select_topic_interactive で対話的に表示）。"""
     W = 60
 
     print()
     print("=" * W)
-    print("  今日のHook候補")
+    print("  今日のHook — おすすめ1案")
     print("  ─ Instagram 1枚目 / Threads 1行目 ─")
     print("=" * W)
 
@@ -365,28 +400,8 @@ def print_topic_candidates(candidates: list) -> None:
         print()
         return
 
-    for i, c in enumerate(candidates, 1):
-        hook      = c.get("hook") or c.get("theme", "")
-        perspective = c.get("perspective", "")
-        angle       = c.get("angle", "")
-        post_type   = c.get("post_type", "共感")
-        icon        = _POST_TYPE_ICON.get(post_type, post_type)
-        reason      = c.get("reason", "")
-        print()
-        tags = "  ".join(filter(None, [
-            f"[{perspective}]" if perspective else "",
-            f"[{angle}]"       if angle       else "",
-        ]))
-        print(f"  [{i:2}]  {icon}  {tags}")
-        print(f"        「{hook}」")
-        if reason:
-            import textwrap as _tw
-            for line in _tw.wrap(reason, width=46):
-                print(f"         {line}")
-
+    _print_hook_card(1, candidates[0])
     print()
-    print("=" * W)
-    print(f"  番号を入力して「今日のHook」を選んでください")
     print("=" * W)
     print()
 
@@ -398,10 +413,11 @@ def select_topic_interactive(
     skip_if_no_tty: bool = True,
 ) -> Optional[dict]:
     """
-    ユーザーが Topic候補を選択する。
-
-    数字（1〜10）または丸数字（①〜⑩）で入力。
-    Enterでスキップ。
+    フロー:
+      1. 1位のHookを表示（print_topic_candidates で既に表示済み）
+      2. 「別案も見ますか？」と質問
+      3. y/Y → 2位・3位を表示
+      4. 番号を選択（Enter = 1位を使用、スキップなし = Ctrl+C のみ）
 
     Returns:
         選択された候補 dict、またはスキップ時 None
@@ -412,18 +428,44 @@ def select_topic_interactive(
     if skip_if_no_tty and not sys.stdin.isatty():
         return None
 
-    print()
-    print("  番号でテーマを選んでください（Enter でスキップ）:")
+    # ── 別案も見ますか？ ──────────────────────────────────────────────
+    print("  別案も見ますか？  y = 2位・3位を表示  Enter = 1位でそのまま進む")
+    try:
+        see_more = input("  > ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
 
+    if see_more in ("y", "yes", "別案", "2", "3"):
+        W = 60
+        print()
+        print("=" * W)
+        print("  2位・3位の候補")
+        print("=" * W)
+        for rank, c in enumerate(candidates[1:3], 2):
+            _print_hook_card(rank, c)
+        print()
+        print("=" * W)
+        print()
+
+    # ── Hook を選択 ───────────────────────────────────────────────────
+    n = len(candidates)
+    hint = "1〜3" if n >= 3 else f"1〜{n}"
+    print(f"  番号を入力してください（{hint}  Enter = 1番を使用）:")
     try:
         choice = input("  > ").strip()
     except (EOFError, KeyboardInterrupt):
-        choice = ""
-
-    if not choice:
-        print("  （スキップしました — 今日はここまで）")
+        print()
         return None
 
+    # Enter → 1番を使用
+    if not choice:
+        selected = candidates[0]
+        hook = selected.get("hook") or selected.get("theme", "")
+        print(f"\n  ✅ 1位を選択: 「{hook}」\n")
+        return selected
+
+    # 数字または丸数字
     digit = None
     if choice.isdigit():
         digit = int(choice) - 1
@@ -432,13 +474,15 @@ def select_topic_interactive(
         if choice in circled:
             digit = circled.index(choice)
 
-    if digit is not None and 0 <= digit < len(candidates):
+    if digit is not None and 0 <= digit < n:
         selected = candidates[digit]
         hook = selected.get("hook") or selected.get("theme", "")
-        print()
-        print(f"  ✅ 選択: 「{hook}」")
-        print()
+        print(f"\n  ✅ {digit + 1}位を選択: 「{hook}」\n")
         return selected
 
-    print(f"  ⚠️ 「{choice}」は認識できませんでした。スキップします。")
-    return None
+    # 認識不能 → 1位を使用
+    selected = candidates[0]
+    hook = selected.get("hook") or selected.get("theme", "")
+    print(f"  ⚠️ 「{choice}」は認識できませんでした。1位を使用します。")
+    print(f"  ✅ 選択: 「{hook}」\n")
+    return selected
