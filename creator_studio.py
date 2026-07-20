@@ -1101,8 +1101,38 @@ def _generate_ceo_challenge(record: dict, review: dict) -> dict:
     # ── Gate 4: Creator Review 点数 ─────────────────────────────────
     score_fail = avg < 78 or brand_score < 78
 
+    # ── Gate 5: Claims Check ────────────────────────────────────────
+    claims_result = record.get("_claims_check", {})
+    data_mode     = record.get("_data_mode", "LIVE_INSTAGRAM")
+    claims_fail   = not claims_result.get("all_pass", True)
+    claims_issues = claims_result.get("blocking_issues", [])
+
+    # ── Gate 6: FALLBACKモード専用 ──────────────────────────────────
+    fallback_issues: list[str] = []
+    if data_mode == "FALLBACK_NO_INSTAGRAM":
+        ig_violations = claims_result.get("instagram_violations", [])
+        for _, lbl in ig_violations:
+            fallback_issues.append(f"FALLBACK時Instagram根拠表現: {lbl}")
+        # trend_level A/B 使用チェック（選択済みcandidateに残っている場合）
+        trend_level = record.get("trend_level", "")
+        if trend_level in ("A", "B"):
+            fallback_issues.append(
+                f"FALLBACK時に根拠レベル{trend_level}は使用不可（最高C）"
+            )
+
+    # ── Gate 7: Reality なし体験談 ──────────────────────────────────
+    reality_issues = [lbl for _, lbl in claims_result.get("reality_violations", [])]
+
     # ── 総合判定 ─────────────────────────────────────────────────────
-    is_no = (not salon_check["is_unique"]) or bool(ng_hits) or bool(concept_hits) or score_fail
+    is_no = (
+        (not salon_check["is_unique"])
+        or bool(ng_hits)
+        or bool(concept_hits)
+        or score_fail
+        or claims_fail
+        or bool(fallback_issues)
+        or bool(reality_issues)
+    )
 
     if is_no:
         reasons_no = []
@@ -1116,6 +1146,12 @@ def _generate_ceo_challenge(record: dict, review: dict) -> dict:
             reasons_no.append(f"Creator Review平均点が{avg}点（目標78点以上）")
         if brand_score < 78:
             reasons_no.append(f"Brand Score {brand_score}点（目標78点以上）")
+        for issue in claims_issues:
+            reasons_no.append(issue)
+        for issue in fallback_issues:
+            reasons_no.append(issue)
+        for issue in reality_issues:
+            reasons_no.append(f"Reality未入力なのに体験談表現: {issue}")
 
         improve_hints = []
         if not salon_check["is_unique"]:
@@ -1128,6 +1164,17 @@ def _generate_ceo_challenge(record: dict, review: dict) -> dict:
         if score_fail:
             w_item, w_score = min(review["scores"].items(), key=lambda x: x[1])
             improve_hints.append(f"【最低スコア項目を改善】\n  「{w_item}」（{w_score}点）を優先してください")
+        if claims_issues:
+            rewrites = [i for i in claims_issues if "言い換え案" in i]
+            if rewrites:
+                improve_hints.append("【Claims Check — 言い換え案】\n" + "\n".join(f"  {r}" for r in rewrites))
+            else:
+                improve_hints.append("【Claims Check — 要修正】\n  " + "\n  ".join(claims_issues))
+        if fallback_issues:
+            improve_hints.append(
+                "【FALLBACKモード違反 — 削除必須】\n"
+                + "\n".join(f"  {i}" for i in fallback_issues)
+            )
 
         return {
             "verdict":      "NO — 投稿しないでください",
@@ -1999,7 +2046,8 @@ def _check_audience_thinking(record: dict) -> dict:
 # ────────────────────────────────────────────────────────────────────────────
 
 def _assemble(today: str, source_type: str, source_url: str,
-              tmpl: dict, why_today: str, mission: str = "") -> dict:
+              tmpl: dict, why_today: str, mission: str = "",
+              data_mode: str = "LIVE_INSTAGRAM") -> dict:
     hook  = tmpl.get("hook", "")
     cta   = tmpl.get("cta", _CTA_SAVE)
     theme = tmpl.get("theme", "")
@@ -2037,11 +2085,26 @@ def _assemble(today: str, source_type: str, source_url: str,
     kpi_key = _select_kpi(record["today_mission"])
     record["_kpi"] = {"key": kpi_key, **_KPI_TYPES[kpi_key]}
 
+    # execution_data_mode をレコードに格納（シート非保存）
+    record["_data_mode"] = data_mode
+
     # ⑨〜⑬ をレコードに埋め込む
     lateral_data = _LATERAL_THINKING.get(theme, _LATERAL_FALLBACK)
     record["_lateral"]          = lateral_data
     review = _compute_creator_review(record)
     record["_creator_review"]   = review
+
+    # Claims Check（因果表現・根拠レベル検証）
+    try:
+        from claims_check import run_claims_check
+        record["_claims_check"] = run_claims_check(record, data_mode)
+    except Exception as _cc_err:
+        record["_claims_check"] = {"all_pass": True, "blocking_issues": [],
+                                   "data_mode": data_mode, "claims": [],
+                                   "hypothesis_count": 0, "fact_count": 0,
+                                   "insight_count": 0, "instagram_violations": [],
+                                   "reality_violations": [], "_error": str(_cc_err)}
+
     record["_ceo_challenge"]    = _generate_ceo_challenge(record, review)
     flow = _build_follower_flow(record)
     record["_follower_flow"]    = flow                                  # ①〜⑤ フロー分析
@@ -2437,6 +2500,7 @@ def _build_from_meeting_topic(
     conversation: Optional[dict] = None,
     mission: str = "教育",
     mission_hint: str = "",
+    data_mode: str = "LIVE_INSTAGRAM",
 ) -> Optional[dict]:
     """
     6ステップ生成フロー の Step4〜6（コンテンツ生成部分）。
@@ -2633,7 +2697,7 @@ def _build_from_meeting_topic(
         f"Editorial Meeting: {meeting.get('selection_reason', '')[:40]}\n"
         f"Source: {source}"
     )
-    return _assemble(today, source, "", tmpl, why)
+    return _assemble(today, source, "", tmpl, why, data_mode=data_mode)
 
 
 def _themes_match(em_theme: str, record_theme: str) -> bool:
@@ -3289,6 +3353,19 @@ def generate_creator_studio_daily(instagram_fetched: int = -1) -> Optional[dict]
     meeting = em.run_editorial_meeting(today, past_themes)
     em_theme = (meeting.get("selected") or {}).get("theme", "")
 
+    # ── execution_data_mode を決定 ───────────────────────────────────
+    if instagram_fetched == 0:
+        _data_mode = "FALLBACK_NO_INSTAGRAM"
+    elif instagram_fetched > 0:
+        _data_mode = "LIVE_INSTAGRAM"
+    else:
+        _data_mode = "LIVE_INSTAGRAM"  # -1 = 不明 → 通常扱い
+
+    if _data_mode == "FALLBACK_NO_INSTAGRAM":
+        print()
+        print("  ⚠️  [FALLBACK_NO_INSTAGRAM] 本日のInstagram取得データなし")
+        print("     根拠レベルA/B禁止・Instagram根拠表現禁止・因果断定禁止")
+
     # ── ⑥ Content Generation ────────────────────────────────────────
     print("\n  ⑥ Content Generation...")
     record = _build_from_meeting_topic(
@@ -3298,6 +3375,7 @@ def generate_creator_studio_daily(instagram_fetched: int = -1) -> Optional[dict]
         conversation=conversation,
         mission=mission,
         mission_hint=mission_hint,
+        data_mode=_data_mode,
     )
 
     if record is None:
@@ -3308,6 +3386,8 @@ def generate_creator_studio_daily(instagram_fetched: int = -1) -> Optional[dict]
             or _try_priority3(today)
             or _priority4(today)
         )
+        if record:
+            record["_data_mode"] = _data_mode
 
     # テーマ一致チェック
     record_theme = record.get("theme", "")
@@ -3320,6 +3400,7 @@ def generate_creator_studio_daily(instagram_fetched: int = -1) -> Optional[dict]
             conversation=conversation,
             mission=mission,
             mission_hint=mission_hint,
+            data_mode=_data_mode,
         )
         if rebuilt:
             record = rebuilt
@@ -3350,6 +3431,7 @@ def generate_creator_studio_daily(instagram_fetched: int = -1) -> Optional[dict]
             conversation=conversation,
             mission=mission,
             mission_hint=mission_hint,
+            data_mode=_data_mode,
         )
         if rebuilt:
             pm.apply_mission_to_record(rebuilt, mission)
@@ -3377,6 +3459,35 @@ def generate_creator_studio_daily(instagram_fetched: int = -1) -> Optional[dict]
 def print_creator_studio_summary(record: dict) -> None:
     import editorial_meeting as em
     import post_mission as pm
+
+    # ── データモード表示（最優先） ───────────────────────────────────
+    _data_mode = record.get("_data_mode", "LIVE_INSTAGRAM")
+    _DATA_MODE_LABELS = {
+        "LIVE_INSTAGRAM":       "LIVE_INSTAGRAM（本日取得データ）",
+        "PAST_INSTAGRAM":       "PAST_INSTAGRAM（過去取得データ）",
+        "FALLBACK_NO_INSTAGRAM": "FALLBACK_NO_INSTAGRAM（本日Instagram取得なし）",
+    }
+    _mode_label = _DATA_MODE_LABELS.get(_data_mode, _data_mode)
+    print()
+    print(f"  データモード: {_mode_label}")
+
+    # FALLBACK の場合は冒頭に警告を表示
+    if _data_mode == "FALLBACK_NO_INSTAGRAM":
+        print()
+        print("  ┌" + "─" * 62 + "┐")
+        print("  │ ⚠️  本投稿案は本日のInstagram取得データを使用していません  │")
+        print("  │    根拠: Thought Library / Season Context / Evidence Registry │"[:66] + "  │")
+        print("  └" + "─" * 62 + "┘")
+
+    # ── Claims Check 結果を表示 ─────────────────────────────────────
+    claims_result = record.get("_claims_check", {})
+    if claims_result:
+        try:
+            from claims_check import format_claims_report
+            print()
+            print(format_claims_report(claims_result))
+        except Exception:
+            pass
 
     # ── POST MISSION を最初に表示 ────────────────────────────────────
     post_m = record.get("_post_mission", "")
