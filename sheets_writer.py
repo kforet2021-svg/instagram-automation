@@ -11,6 +11,13 @@ reels/trend_postsシートに保存されるのは「構造的に分析対象と
 フィルター前の生データ(除外された投稿も含む全件)をraw_fetch_logシートに
 常時保存するようにした(下記参照)。
 
+【2026-07-17: トレンド継続性分析シート追加】
+SHEET_TREND_CONTINUITY("trend_continuity")、TREND_CONTINUITY_HEADERS、
+get_recent_success_factors(days=10)、save_trend_continuity_report()を追加した。
+直近10日間のsuccess_factorsを読み込み、継続トレンド/一時話題/飽和度分析を
+1行/実行でtrend_continuityシートに保存する(OpenAI呼び出し1回増加を伴う。
+呼び出し元はopenai_analyzer.generate_trend_continuity_report)。
+
 【2026-07-05: Trend Score → Research Candidate Scoreへのリネーム】
 ユーザー要望「Trend Scoreを廃止してください。代わりにResearch Candidate Score
 を追加してください」に対応し、trend_score.py → research_candidate_score.py、
@@ -280,6 +287,8 @@ from prompts import (
     PATTERN_LAB_THREADS_KEYS,
     PATTERN_LAB_CAPTION_KEYS,
     NORTH_STAR_DAILY_TEXT_KEYS,
+    TREND_CONTINUITY_TEXT_KEYS,
+    EDITORIAL_COMMENT_TEXT_KEYS,
 )
 from research_candidate_score import BREAKDOWN_KEYS as RESEARCH_CANDIDATE_SCORE_BREAKDOWN_KEYS
 from research_engine import gather_evidence_for_post
@@ -298,6 +307,9 @@ SHEET_TREND_ANALYSIS = "trend_analysis"
 SHEET_CATEGORY_TREND_SUMMARY = "trend_analysis_summary"
 SHEET_DAILY_CONTENT_PICKS = "daily_content_picks"
 SHEET_CREATOR_STUDIO_DAILY = "creator_studio_daily"  # 2026-07-01 Creator Studio MVP
+SHEET_TREND_CONTINUITY = "trend_continuity"  # 2026-07-17: 直近10日間トレンド継続性分析
+SHEET_EDITORIAL_COMMENT = "editorial_comment"  # 2026-07-17: 編集長コメント(1行/実行)
+SHEET_RUN_LOG = "run_log"  # 2026-07-18: 実行履歴ログ(1行/実行バッチ)
 SHEET_RESEARCH_CANDIDATES = "research_candidates"
 SHEET_RESEARCH_CANDIDATE_SCORE_DEBUG = "research_candidate_score_debug"
 SHEET_POST_ANALYSIS = "post_analysis"
@@ -375,16 +387,32 @@ REEL_SCRIPTS_HEADERS = [
     "reference_reason_3",  # 36
     "corehari_changes",    # 37
     "editor_comment",      # 38
-    "posted",              # 39
-    "posted_at",           # 40
-    "instagram_url",       # 41
-    "views",               # 42
-    "likes",               # 43
-    "comments",            # 44
-    "saves",               # 45
-    "shares",              # 46
-    "follows",             # 47
-    "notes",               # 48
+    "trend_source",        # 39
+    "trend_source_count",  # 40
+    "trend_level",         # 41
+    "trend_reason",        # 42
+    "trend_checked_at",    # 43
+    "reference_urls",      # 44
+    "reference_dates",     # 45
+    "instagram_evidence",  # 46
+    "x_evidence",          # 47
+    "threads_evidence",    # 48
+    "google_trends_evidence", # 49
+    "news_evidence",       # 50
+    "seasonal_evidence",   # 51
+    "own_account_evidence",# 52
+    "competitor_evidence", # 53
+    "ai_original_flag",    # 54
+    "posted",              # 55
+    "posted_at",           # 56
+    "instagram_url",       # 57
+    "views",               # 58
+    "likes",               # 59
+    "comments",            # 60
+    "saves",               # 61
+    "shares",              # 62
+    "follows",             # 63
+    "notes",               # 64
 ]
 
 RANK_TOP_N = 20
@@ -429,7 +457,9 @@ RANK_SHEET_HEADERS = ["実行日時", "順位"] + POST_COLUMNS
 # 2026-07-02改名(item7): 旧TREND_ANALYSIS_HEADERS。trend_analysis_summary
 # シート(カテゴリ単位の集計、実行ごとに1行)用のヘッダー。
 CATEGORY_TREND_SUMMARY_HEADERS = (
-    ["実行日時", "対象カテゴリ", "分析対象投稿数"]
+    # 2026-07-18: 分析対象リール数・アカウント数・平均指標を追加
+    ["実行日時", "対象カテゴリ", "分析対象リール数", "対象アカウント数",
+     "平均再生数", "平均いいね率(%)", "平均コメント率(%)"]
     + CATEGORY_ANALYSIS_TEXT_KEYS
     + CATEGORY_ANALYSIS_LIST_KEYS
 )
@@ -484,7 +514,7 @@ RESEARCH_CANDIDATES_HEADERS = (
     + POST_COLUMNS
     + ["Research Candidate Score合計"]
     + RESEARCH_CANDIDATE_SCORE_BREAKDOWN_KEYS
-    + ["判定"]
+    + ["判定", "再生数有無", "異常値フラグ", "投稿種別", "除外理由"]  # 2026-07-17追加 / 2026-07-18: 投稿種別・除外理由追加
 )
 
 # research_candidate_score_debugシートのヘッダー(2026-07-01追加。2026-07-05に
@@ -494,11 +524,12 @@ RESEARCH_CANDIDATES_HEADERS = (
 # (生値の列名には_点を付けず、得点の列名には末尾に_点を付けて区別する)。
 RESEARCH_CANDIDATE_SCORE_DEBUG_HEADERS = [
     "実行日時", "投稿URL", "投稿者", "Research Candidate Score合計", "判定",
+    "再生数有無", "異常値フラグ",  # 2026-07-17追加
     "再生数", "再生数_点",
     "フォロワー数",
     "再生倍率", "再生倍率_点",
-    "いいね数", "いいね率", "いいね率_点",
-    "コメント数", "コメント率", "コメント率_点",
+    "いいね数", "いいね率(÷フォロワー)", "いいね率_点",   # 2026-07-17: 分母をviewsからfollowersに変更
+    "コメント数", "コメント率(÷フォロワー)", "コメント率_点",  # 2026-07-17: 同上
     "投稿日", "投稿からの日数_点",
     "動画尺(秒)", "動画時間_点",
     "投稿頻度(取得窓内の同アカウント投稿数)", "投稿頻度_点",
@@ -535,6 +566,34 @@ SUCCESS_FACTOR_HEADERS = (
     ["実行日時", "投稿URL", "投稿者", "Research Candidate Score", "判定"]
     + SUCCESS_FACTOR_FIELDS
 )
+
+# 2026-07-17追加: trend_continuityシート(1行/実行、過去10日間のトレンド継続性分析)
+TREND_CONTINUITY_HEADERS = [
+    "実行日時",
+    "分析期間",
+    "対象投稿数",
+] + list(TREND_CONTINUITY_TEXT_KEYS)
+
+# 2026-07-17: editorial_commentシート(1行/実行)
+EDITORIAL_COMMENT_HEADERS = ["実行日時", "分析投稿数"] + list(EDITORIAL_COMMENT_TEXT_KEYS)
+
+# 2026-07-18: run_logシート — 実行履歴ログ(1バッチ1行)
+RUN_LOG_HEADERS = [
+    "実行日時",
+    "処理種別",
+    "対象アカウント",
+    "snapshot_id",
+    "Bright Data status",
+    "取得件数",
+    "保存件数",
+    "未回収",
+    "エラー内容",
+    "次回確認が必要か",
+    "投稿生成を実行したか",
+]
+
+# 2026-07-18: trend_analysisシートに0件状態を保存するためのフォールバック行定義
+TREND_ANALYSIS_NO_DATA_ROW_LABEL = "Instagramデータ取得0件"
 
 # 2026-07-02新設(item7): trend_analysisシート(投稿ごと、1投稿1行)のヘッダー。
 # 「カテゴリ」(Instagram全体トレンド/美容ジャンルトレンド。item5対応)を含む点が
@@ -906,9 +965,37 @@ def save_adopted_posts(posts: list) -> None:
     _save_reels(posts, SHEET_REELS)
 
 
+def _interleave_posts(posts: list) -> list:
+    """
+    【2026-07-18: ⑧】同じアカウントが連続しないようラウンドロビン配置する。
+    sheets_writer 内で単独使用できるようにインライン実装。
+    """
+    from collections import deque
+    groups: dict = {}
+    for p in posts:
+        key = (
+            (p.get("source_account") or "").strip().lower()
+            or (p.get("username") or "").strip().lower()
+            or "_"
+        )
+        groups.setdefault(key, []).append(p)
+    queues = deque(deque(g) for g in groups.values())
+    result: list = []
+    while queues:
+        q = queues.popleft()
+        result.append(q.popleft())
+        if q:
+            queues.append(q)
+    return result
+
+
 def _save_ranking(posts: list, sheet_name: str, sort_key, top_n: int = RANK_TOP_N) -> None:
-    """postsをsort_keyの降順に並べ、上位top_n件をランキングシートに保存する。"""
+    """
+    postsをsort_keyの降順に並べ、上位top_n件をランキングシートに保存する。
+    2026-07-18: 同じアカウントが連続しないよう_interleave_postsでラウンドロビン配置する。
+    """
     ranked = sorted(posts, key=sort_key, reverse=True)[:top_n]
+    ranked = _interleave_posts(ranked)  # ⑧ 同一アカウント連続防止
     if not ranked:
         return
 
@@ -950,18 +1037,15 @@ def save_rankings(posts: list) -> None:
 
 def save_research_candidates(posts: list) -> None:
     """
-    プール対象の投稿"全件"について、research_candidate_score.pyが計算した
-    Research Candidate Score(合計・7項目の内訳・判定)をresearch_candidates
-    シートに保存する(2026-07-05: trend_postsからリネーム)。
+    Research Candidate Score計算済みの投稿（採用＋各理由で除外されたもの全件）を
+    research_candidatesシートに保存する(2026-07-05: trend_postsからリネーム)。
 
-    AI個別分析(post_analysis/core_hari_ideas)が実行されたかどうかに関わらず
-    全件を記録するため、「なぜこの投稿はAI分析されなかったのか」を後から
-    確認できる透明性ログになる。
+    【2026-07-18】除外された投稿も含めた全件を保存するよう変更。
+    除外理由は post["pool_exclusion_reason"] から取得する。
+    除外理由の種類: 期間外 / 同一アカウント上限 / 再生数未取得 / スコア不足 / ""(採用済み)
 
-    posts: 各要素が "research_candidate_score" キー
-           (research_candidate_score.compute_research_candidate_scoreの
-           戻り値: {"total", "breakdown", "tier"})を持っていること
-           (main.pyがresearch_candidate_score.score_posts()で付与してから渡す)。
+    posts: 各要素が "research_candidate_score" キーを持つか、または
+           pool_exclusion_reason が付与された期間外除外投稿。
     """
     if not posts:
         return
@@ -974,10 +1058,17 @@ def save_research_candidates(posts: list) -> None:
         score = post.get("research_candidate_score") or {}
         breakdown = score.get("breakdown") or {}
 
-        row = [now] + _post_row(post) + [score.get("total", 0)]
+        row = [now] + _post_row(post) + [score.get("total", "")]
         for key in RESEARCH_CANDIDATE_SCORE_BREAKDOWN_KEYS:
-            row.append(breakdown.get(key, 0))
-        row.append(score.get("tier", ""))
+            row.append(breakdown.get(key, ""))
+        # 2026-07-17: 再生数有無・異常値フラグ
+        views_available = score.get("views_available", None)
+        anomalies = score.get("anomalies", [])
+        row.append("あり" if views_available is True else ("なし" if views_available is False else ""))
+        row.append(" / ".join(anomalies) if anomalies else "")
+        # 2026-07-18: 投稿種別 / 除外理由
+        row.append(post.get("post_type", ""))
+        row.append(post.get("pool_exclusion_reason", ""))
         rows.append(row)
 
     worksheet.append_rows(rows, value_input_option="USER_ENTERED")
@@ -1013,8 +1104,12 @@ def save_research_candidate_score_debug(posts: list) -> None:
         views = post.get("views", 0) or 0
         likes = post.get("likes", 0) or 0
         comments = post.get("comments", 0) or 0
-        like_rate = round(likes / views, 4) if views else 0
-        comment_rate = round(comments / views, 4) if views else 0
+        followers = post.get("followers") or 0
+        # 2026-07-17: いいね率・コメント率の分母をviews→followersに変更
+        like_rate = round(likes / followers, 4) if followers else 0
+        comment_rate = round(comments / followers, 4) if followers else 0
+        views_available = score.get("views_available", True)
+        anomalies = score.get("anomalies", [])
 
         rows.append([
             now,
@@ -1022,6 +1117,8 @@ def save_research_candidate_score_debug(posts: list) -> None:
             post.get("username", ""),
             score.get("total", 0),
             score.get("tier", ""),
+            "あり" if views_available else "なし",          # 2026-07-17追加
+            " / ".join(anomalies) if anomalies else "",    # 2026-07-17追加
             views,
             breakdown.get("再生数", 0),
             _blank_if_none(post.get("followers")),
@@ -1044,24 +1141,32 @@ def save_research_candidate_score_debug(posts: list) -> None:
     worksheet.append_rows(rows, value_input_option="USER_ENTERED")
 
 
-def save_category_trend_summary(category_label: str, posts: list, analysis: dict) -> None:
+def save_category_trend_summary(
+    category_label: str,
+    posts: list,
+    analysis: dict,
+    reel_stats: dict = None,
+) -> None:
     """
     【2026-07-02改名(item7)】旧save_trend_analysis。カテゴリ単位のAI集約分析
     結果をtrend_analysis_summaryシートに1行保存する(実行ごとに1行)。
     タイトル案10個/冒頭フック10個は、改行区切りの番号付きテキストとして保存する。
 
-    旧trend_analysisシート名はSHEET_CATEGORY_TREND_SUMMARY
-    ("trend_analysis_summary")に変更した。旧名"trend_analysis"は、ユーザー
-    要望(item7: 投稿ごとのTrend Score・分析内容・伸びた理由・CORE HARI FACEへの
-    応用を保存したい)に対応するため、投稿ごとの形式に再設計したsave_trend_
-    analysis()に明け渡した(下記参照)。
-
-    【2026-07-02(item5)】Instagram全体トレンド/美容ジャンルトレンドの
-    2カテゴリ分、main.pyから1回ずつ(category_labelを変えて)呼ばれる想定。
+    【2026-07-18】リール統計(reel_stats)を追加。
+    reel_stats: {reel_count, account_count, avg_views, avg_like_rate_pct, avg_comment_rate_pct}
+    Noneの場合はpostsから件数のみ自動算出する。
     """
     worksheet = _get_or_create_worksheet(SHEET_CATEGORY_TREND_SUMMARY, CATEGORY_TREND_SUMMARY_HEADERS)
 
-    row = [_now(), category_label, len(posts)]
+    stats = reel_stats or {}
+    row = [
+        _now(), category_label,
+        stats.get("reel_count", len(posts)),
+        stats.get("account_count", ""),
+        stats.get("avg_views", ""),
+        stats.get("avg_like_rate_pct", ""),
+        stats.get("avg_comment_rate_pct", ""),
+    ]
     for key in CATEGORY_ANALYSIS_TEXT_KEYS:
         row.append(analysis.get(key, ""))
     for key in CATEGORY_ANALYSIS_LIST_KEYS:
@@ -1554,6 +1659,142 @@ def remove_from_mention_tracker(usernames: list) -> None:
 
     for row_number in rows_to_delete:
         worksheet.delete_rows(row_number)
+
+
+# --- trend_continuity: 直近10日間のトレンド継続性分析(2026-07-17追加) ---
+
+
+def get_recent_success_factors(days: int = 10) -> dict:
+    """
+    success_factorsシートから直近N日分のレコードを読み込み、
+    トレンド継続性分析プロンプト用の形式に変換して返す。
+
+    戻り値:
+        {
+            "entries_by_day": {"YYYY-MM-DD": [{"タイトル": ..., "冒頭3秒のフック": ...,
+                               "伸びた理由": ..., "心理トリガー": ..., "CTA": ...}, ...]},
+            "total_posts": int,
+            "period": "YYYY-MM-DD 〜 YYYY-MM-DD"
+        }
+    実行日時列(index 0)でフィルタする。シートが存在しない場合は空dictを返す。
+    """
+    import datetime as _dt
+
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+    cutoff_naive = cutoff.replace(tzinfo=None)
+
+    try:
+        ws = _get_spreadsheet().worksheet(SHEET_SUCCESS_FACTORS)
+        records = ws.get_all_values()
+    except Exception:
+        return {"entries_by_day": {}, "total_posts": 0, "period": ""}
+
+    if len(records) < 2:
+        return {"entries_by_day": {}, "total_posts": 0, "period": ""}
+
+    header = records[0]
+    # SUCCESS_FACTOR_HEADERS先頭5列: 実行日時, 投稿URL, 投稿者, RC Score, 判定
+    col_idx = {col: i for i, col in enumerate(header)}
+
+    EXTRACT_KEYS = ["タイトル", "冒頭3秒のフック", "伸びた理由", "心理トリガー", "CTA"]
+    entries_by_day: dict = {}
+    dates_seen = []
+
+    for row in records[1:]:
+        raw_ts = row[0] if row else ""
+        if not raw_ts:
+            continue
+        # 実行日時は"YYYY/MM/DD HH:MM:SS"または"YYYY-MM-DD ..."形式
+        try:
+            ts_str = raw_ts.replace("/", "-").split(".")[0]
+            ts = _dt.datetime.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+
+        if ts < cutoff_naive:
+            continue
+
+        date_str = ts.strftime("%Y-%m-%d")
+        entry = {k: row[col_idx[k]] if k in col_idx and col_idx[k] < len(row) else ""
+                 for k in EXTRACT_KEYS}
+        entries_by_day.setdefault(date_str, []).append(entry)
+        dates_seen.append(date_str)
+
+    total = sum(len(v) for v in entries_by_day.values())
+    if dates_seen:
+        period = f"{min(dates_seen)} 〜 {max(dates_seen)}"
+    else:
+        period = ""
+
+    return {"entries_by_day": entries_by_day, "total_posts": total, "period": period}
+
+
+def save_trend_continuity_report(period: str, total_posts: int, result: dict) -> None:
+    """
+    generate_trend_continuity_reportの出力(TREND_CONTINUITY_TEXT_KEYSの各フィールド)を
+    trend_continuityシートに1行追記する(1回/実行)。
+
+    period: "YYYY-MM-DD 〜 YYYY-MM-DD"
+    total_posts: 分析対象の投稿数
+    result: openai_analyzer.generate_trend_continuity_reportの戻り値dict
+    """
+    worksheet = _get_or_create_worksheet(SHEET_TREND_CONTINUITY, TREND_CONTINUITY_HEADERS)
+    row = [_now(), period, total_posts]
+    for key in TREND_CONTINUITY_TEXT_KEYS:
+        row.append(result.get(key, ""))
+    worksheet.append_row(row, value_input_option="USER_ENTERED")
+
+
+def save_run_log(run_info: dict) -> None:
+    """
+    2026-07-18追加: 実行履歴を run_log シートに1行追記する。
+    取得0件・タイムアウト・成功 いずれの場合も必ず呼ぶことで、空欄でなく
+    「データ不足」「処理中」などの状態が記録される。
+
+    run_info のキー(全てoptional、なければ空文字列):
+      処理種別 / 対象アカウント / snapshot_id / Bright Data status /
+      取得件数 / 保存件数 / 未回収 / エラー内容 / 次回確認が必要か / 投稿生成を実行したか
+    """
+    worksheet = _get_or_create_worksheet(SHEET_RUN_LOG, RUN_LOG_HEADERS)
+    row = [_now()]
+    for key in RUN_LOG_HEADERS[1:]:  # 実行日時はすでに追加済み
+        row.append(str(run_info.get(key, "")))
+    worksheet.append_row(row, value_input_option="USER_ENTERED")
+
+
+def save_trend_analysis_no_data(reason: str = "Instagram取得0件") -> None:
+    """
+    2026-07-18追加: Instagram取得0件時にtrend_analysisシートへ「データ不足」行を保存する。
+    空欄のままにせず、データ不足であることが分かる状態にする。
+    """
+    worksheet = _get_or_create_worksheet(SHEET_TREND_ANALYSIS, TREND_ANALYSIS_HEADERS)
+    now = _now()
+    # ヘッダー項目数に合わせて空欄で埋め、重要列だけ値を入れる
+    row = [now, TREND_ANALYSIS_NO_DATA_ROW_LABEL, "", "", "", ""]
+    # SUCCESS_FACTOR_FIELDSの列は最初の3列をデータ不足情報で埋め、残りは空欄
+    filled = {
+        "伸びた理由": f"データ不足: {reason}",
+        "冒頭3秒のフック": "データ不足",
+        "CTA": "データ不足",
+    }
+    for key in SUCCESS_FACTOR_FIELDS:
+        row.append(filled.get(key, ""))
+    worksheet.append_row(row, value_input_option="USER_ENTERED")
+
+
+def save_editorial_comment(entries: list, result: dict) -> None:
+    """
+    generate_editorial_commentの出力(EDITORIAL_COMMENT_TEXT_KEYSの各フィールド)を
+    editorial_commentシートに1行追記する(1回/実行)。
+
+    entries: [{"post":..., "success_factors":..., ...}] 当日のqualifying投稿全件
+    result: openai_analyzer.generate_editorial_commentの戻り値dict
+    """
+    worksheet = _get_or_create_worksheet(SHEET_EDITORIAL_COMMENT, EDITORIAL_COMMENT_HEADERS)
+    row = [_now(), len(entries)]
+    for key in EDITORIAL_COMMENT_TEXT_KEYS:
+        row.append(result.get(key, ""))
+    worksheet.append_row(row, value_input_option="USER_ENTERED")
 
 
 # --- north_star_daily: Creator Intelligence Sprint 1 Task A(2026-07-03追加) ---

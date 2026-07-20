@@ -200,6 +200,21 @@ FETCH_TOTAL_BUDGET_SEC = 300  # Bright Data全体に許可する最大秒数(5�
 # Bright Data Dashboard の snapshot 詳細ページURL（ログ表示・調査用）
 BD_SNAPSHOT_DASHBOARD_URL = "https://brightdata.com/cp/datasets/snapshots/{snapshot_id}"
 
+# ─── Stale / 障害検出しきい値 (2026-07-20) ───────────────────────────────────
+# Bright Data 側の障害で全 snapshot が running のまま完了しない事象への対処。
+#
+# 状態区別:
+#   completed    : status=ready でダウンロード済み
+#   failed       : status=failed (Bright Data が明示的に失敗を返した)
+#   running      : trigger 後 STALE_WARNING_MIN 分以内
+#   stale        : STALE_WARNING_MIN 分超〜STALE_ABORT_MIN 分
+#   not_triggered: trigger そのものを行っていない（trigger 禁止により）
+#
+STALE_WARNING_MIN  = 30   # これを超えると "stale" 警告
+STALE_ABORT_MIN    = 120  # これを超えると異常扱い（新規 trigger しない）
+MAX_RUNNING_TO_TRIGGER = 5  # running/stale がこの件数以上なら新規 trigger を禁止
+                             # （Bright Data 障害中の無限 trigger 防止）
+
 # --- 通信リトライ設定 ---
 # Bright Data側、またはネットワーク経路で一時的に接続が切れる
 # (例: "Connection reset by peer") ことがあるため、1回ごとの通信失敗で
@@ -669,6 +684,98 @@ def _load_pending_snapshots() -> dict:
     return {}
 
 
+def _snapshot_age_minutes(triggered_at_str: str) -> float:
+    """triggered_at 文字列から経過分数を返す。パース失敗時は -1。"""
+    try:
+        tdt = dt.datetime.fromisoformat(triggered_at_str.replace("Z", "+00:00"))
+        return (dt.datetime.now(dt.timezone.utc) - tdt).total_seconds() / 60
+    except Exception:
+        return -1.0
+
+
+def _classify_snapshot_state(info: dict) -> str:
+    """
+    pending エントリ1件の状態を返す。
+      completed    : bd_status == "ready" または "recovered"（正常完了）
+      failed       : bd_status == "failed"
+      running      : trigger 後 STALE_WARNING_MIN 分以内
+      stale        : STALE_WARNING_MIN 分超〜STALE_ABORT_MIN 分
+      stale_abort  : STALE_ABORT_MIN 分超（異常扱い）
+      not_triggered: snapshot_id がない
+    """
+    sid = info.get("snapshot_id", "")
+    bd_status = info.get("bd_status", "")
+
+    if not sid:
+        return "not_triggered"
+    if bd_status in ("ready", "recovered"):
+        return "completed"
+    if bd_status == "failed":
+        return "failed"
+
+    age = _snapshot_age_minutes(info.get("triggered_at", ""))
+    if age < 0:
+        return "running"
+    if age > STALE_ABORT_MIN:
+        return "stale_abort"
+    if age > STALE_WARNING_MIN:
+        return "stale"
+    return "running"
+
+
+def _count_active_snapshots(pending: dict) -> dict:
+    """
+    pending の各エントリを状態別にカウントする。
+    戻り値: {"running": N, "stale": N, "stale_abort": N, "completed": N, "failed": N}
+    """
+    counts: dict[str, int] = {"running": 0, "stale": 0, "stale_abort": 0, "completed": 0, "failed": 0}
+    for info in pending.values():
+        state = _classify_snapshot_state(info)
+        if state in counts:
+            counts[state] += 1
+    return counts
+
+
+def _check_trigger_allowed(pending: dict) -> tuple[bool, str]:
+    """
+    新規 trigger を許可するかどうかを判定する。
+    戻り値: (allowed: bool, reason: str)
+    """
+    counts = _count_active_snapshots(pending)
+    active = counts["running"] + counts["stale"] + counts["stale_abort"]
+
+    if active >= MAX_RUNNING_TO_TRIGGER:
+        reason = (
+            f"⚠️  Bright Data 障害の疑い: {active}件の snapshot が running/stale のまま完了していません。\n"
+            f"   (running={counts['running']} stale={counts['stale']} stale_abort={counts['stale_abort']})\n"
+            f"   新規 trigger を停止し、Instagram取得なしモードで続行します。\n"
+            f"   Dashboard で各 snapshot の状態を確認してください:\n"
+            f"   https://brightdata.com/cp/datasets"
+        )
+        return False, reason
+    return True, ""
+
+
+def _print_pending_health(pending: dict) -> None:
+    """pending_snapshots.json の健全性を表示する。"""
+    if not pending:
+        return
+    counts = _count_active_snapshots(pending)
+    total = len(pending)
+    real = sum(1 for v in pending.values() if v.get("snapshot_id", "").startswith("sd_"))
+    print(f"  pending_snapshots: 合計{total}件 (実 snapshot: {real}件)")
+    for state, cnt in counts.items():
+        if cnt:
+            label = {
+                "running":     "  running（正常）",
+                "stale":       "⚠️  stale (30分超)",
+                "stale_abort": "❌ stale_abort (2時間超・異常)",
+                "completed":   "  completed",
+                "failed":      "❌ failed",
+            }.get(state, state)
+            print(f"    {label}: {cnt}件")
+
+
 def _save_pending_snapshots(snapshots: dict) -> None:
     """
     未完了ジョブ情報をpending_snapshots.jsonに保存する。
@@ -681,18 +788,37 @@ def _save_pending_snapshots(snapshots: dict) -> None:
         print(f"pending_snapshots.jsonへの保存に失敗しました(本処理には影響しません): {e}")
 
 
-def _check_snapshot_status(snapshot_id: str) -> str:
+def _check_snapshot_status(snapshot_id: str) -> tuple[str, dict]:
     """
-    既存のsnapshot_idの現在のstatus("ready"/"running"/"failed"/エラー時"error")を返す。
+    既存のsnapshot_idの現在のstatus を返す。
+    戻り値: (status_str, detail_dict)
+      status_str: "ready" / "running" / "failed" / "error" / "unknown"
+      detail_dict: {"http_status": N, "body": "...", "error_message": "..."}
     """
     try:
-        progress_resp = _request_with_retry(
+        r = _request_with_retry(
             "GET", f"{API_BASE}/datasets/v3/progress/{snapshot_id}", timeout=30
         )
-        return progress_resp.json().get("status", "unknown")
+        http_status = r.status_code
+        try:
+            body = r.json()
+        except Exception:
+            body = {"raw": r.text[:500]}
+
+        status = body.get("status", "unknown") if isinstance(body, dict) else "unknown"
+        error_msg = ""
+        if isinstance(body, dict):
+            error_msg = body.get("error") or body.get("error_message") or body.get("message") or ""
+        detail = {
+            "http_status": http_status,
+            "body": str(body)[:300],
+            "error_message": error_msg,
+        }
+        return status, detail
     except Exception as e:
-        print(f"snapshot_id={snapshot_id}の状態確認中にエラーが発生しました: {e}")
-        return "error"
+        detail = {"http_status": 0, "body": str(e)[:300], "error_message": str(e)}
+        print(f"  snapshot_id={snapshot_id}の状態確認中にエラーが発生しました: {e}")
+        return "error", detail
 
 
 def _save_debug_snapshot(payload) -> None:
@@ -859,11 +985,11 @@ def _trigger_and_collect(
     return True, items, snapshot_id, "ready"
 
 
-def _trigger_batch(input_list: list) -> tuple[str | None, str]:
+def _trigger_batch(input_list: list) -> tuple[str | None, str, dict]:
     """
-    Bright Data の trigger API を呼び出し (snapshot_id, bd_status) を返す。
-    成功: (snapshot_id, "running")
-    失敗: (None, "trigger_failed")
+    Bright Data の trigger API を呼び出し (snapshot_id, bd_status, error_detail) を返す。
+    成功: (snapshot_id, "running", {})
+    失敗: (None, "trigger_failed", {"http_status": N, "body": "...", "error_code": "..."})
     """
     params = {"dataset_id": REELS_DATASET_ID, "format": "json", "include_errors": "true"}
     params.update(REELS_DISCOVER_QUERY)
@@ -872,14 +998,30 @@ def _trigger_batch(input_list: list) -> tuple[str | None, str]:
             "POST", f"{API_BASE}/datasets/v3/trigger",
             params=params, json=input_list, timeout=60,
         )
-        snapshot_id = resp.json().get("snapshot_id")
+        http_status = resp.status_code
+        try:
+            body = resp.json()
+        except Exception:
+            body = {"raw": resp.text[:500]}
+
+        snapshot_id = body.get("snapshot_id") if isinstance(body, dict) else None
+
+        if http_status >= 400 or not snapshot_id:
+            error_detail = {
+                "http_status": http_status,
+                "body": str(body)[:500],
+                "error_code": body.get("error_code", "") if isinstance(body, dict) else "",
+                "error_message": body.get("message", body.get("error", "")) if isinstance(body, dict) else str(body)[:200],
+            }
+            print(f"  [trigger失敗] HTTP {http_status}: {error_detail['error_message'] or body}")
+            return None, "trigger_failed", error_detail
+
     except requests.RequestException as e:
+        error_detail = {"http_status": 0, "body": str(e)[:500], "error_code": "network_error", "error_message": str(e)}
         print(f"  [trigger失敗] {e}")
-        return None, "trigger_failed"
-    if not snapshot_id:
-        print("  [trigger失敗] snapshot_id が返りませんでした")
-        return None, "trigger_failed"
-    return snapshot_id, "running"
+        return None, "trigger_failed", error_detail
+
+    return snapshot_id, "running", {}
 
 
 def _download_snapshot(snapshot_id: str) -> tuple[bool, list, str]:
@@ -1093,6 +1235,22 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
     pending = _load_pending_snapshots()
     updated_pending = dict(pending)
 
+    # ── pending 健全性チェック ─────────────────────────────────────────────
+    _print_pending_health(pending)
+    trigger_allowed, trigger_block_reason = _check_trigger_allowed(pending)
+    if not trigger_allowed:
+        print()
+        print("=" * 70)
+        print(trigger_block_reason)
+        print("=" * 70)
+        print()
+        return {
+            "posts": [],
+            "snapshot_meta": [],
+            "bd_outage": True,
+            "outage_reason": trigger_block_reason,
+        }
+
     failed_accounts = []
     fetch_start = time.monotonic()
 
@@ -1133,19 +1291,23 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             if pending_stale:
                 pass  # fallthrough to new trigger
             else:
-                status = _check_snapshot_status(pending_sid)
+                status, _status_detail = _check_snapshot_status(pending_sid)
                 dashboard_url = BD_SNAPSHOT_DASHBOARD_URL.format(snapshot_id=pending_sid)
+                state = _classify_snapshot_state({**pending[batch_key], "bd_status": status})
                 print(
                     f"  バッチ{batch_index}/{len(batches)}: "
-                    f"前回pending snapshot_id={pending_sid} → status={status}"
+                    f"前回pending snapshot_id={pending_sid} → status={status} [{state}]"
                 )
                 print(f"    Dashboard: {dashboard_url}")
+                if _status_detail.get("error_message"):
+                    print(f"    ⚠️  error: {_status_detail['error_message']}")
                 if status in ("ready", "running"):
                     running_jobs[batch_key] = {
-                        "snapshot_id": pending_sid,
-                        "accounts": batch_usernames,
-                        "batch_index": batch_index,
-                        "recovered": status == "ready",
+                        "snapshot_id":    pending_sid,
+                        "accounts":       batch_usernames,
+                        "batch_index":    batch_index,
+                        "recovered":      status == "ready",
+                        "triggered_at_iso": pending[batch_key].get("triggered_at", ""),
                     }
                     continue
                 elif status == "failed":
@@ -1167,38 +1329,50 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             f"  バッチ{batch_index}/{len(batches)}: trigger → "
             f"{', '.join(batch_usernames)}"
         )
-        snapshot_id, bd_status = _trigger_batch(input_list)
+        snapshot_id, bd_status, trigger_error = _trigger_batch(input_list)
 
         if snapshot_id is None:
-            print(f"  バッチ{batch_index}: trigger 失敗 → スキップ")
+            err_body = trigger_error.get("body", "")
+            err_code = trigger_error.get("error_code", "")
+            err_msg  = trigger_error.get("error_message", "")
+            http_st  = trigger_error.get("http_status", 0)
+            print(f"  バッチ{batch_index}: trigger 失敗 (HTTP {http_st}) → スキップ")
+            if err_msg:
+                print(f"    error: {err_msg}")
             failed_accounts.extend(batch_usernames)
             snapshot_meta.append({
-                "batch_key": batch_key,
+                "batch_key":   batch_key,
                 "snapshot_id": None,
-                "bd_status": "trigger_failed",
-                "error_msg": "Bright Data triggerに失敗（snapshot_id未取得）",
-                "accounts": batch_usernames,
-                "recovered": False,
+                "bd_status":   "trigger_failed",
+                "error_msg":   f"HTTP {http_st} / {err_msg or err_code or err_body[:100]}",
+                "accounts":    batch_usernames,
+                "recovered":   False,
             })
             continue
 
-        dashboard_url = BD_SNAPSHOT_DASHBOARD_URL.format(snapshot_id=snapshot_id)
-        print(f"  バッチ{batch_index}: snapshot_id={snapshot_id} 取得 → ポーリング待機へ")
-        print(f"    Dashboard: {dashboard_url}")
-        # trigger直後に即時永続化
-        updated_pending[batch_key] = {
-            "snapshot_id": snapshot_id,
-            "accounts": batch_usernames,
-            "triggered_at": now.isoformat(),
-            "bd_status": "running",
-        }
-        _save_pending_snapshots(updated_pending)
+        # 重複保存チェック: 同じ snapshot_id が既に pending にある場合はスキップ
+        existing_sids = {v.get("snapshot_id") for v in updated_pending.values()}
+        if snapshot_id in existing_sids:
+            print(f"  バッチ{batch_index}: snapshot_id={snapshot_id} は既に pending に存在 → 重複スキップ")
+        else:
+            dashboard_url = BD_SNAPSHOT_DASHBOARD_URL.format(snapshot_id=snapshot_id)
+            print(f"  バッチ{batch_index}: snapshot_id={snapshot_id} 取得 → ポーリング待機へ")
+            print(f"    Dashboard: {dashboard_url}")
+            # trigger直後に即時永続化
+            updated_pending[batch_key] = {
+                "snapshot_id":    snapshot_id,
+                "accounts":       batch_usernames,
+                "triggered_at":   now.isoformat(),
+                "bd_status":      "running",
+            }
+            _save_pending_snapshots(updated_pending)
 
         running_jobs[batch_key] = {
-            "snapshot_id": snapshot_id,
-            "accounts": batch_usernames,
-            "batch_index": batch_index,
-            "recovered": False,
+            "snapshot_id":    snapshot_id,
+            "accounts":       batch_usernames,
+            "batch_index":    batch_index,
+            "recovered":      False,
+            "triggered_at_iso": now.isoformat(),
         }
 
     print(f"  ─ フェーズ1完了: {len(running_jobs)}バッチのtrigger成功 ─")
@@ -1244,12 +1418,18 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
 
             if already_ready:
                 status = "ready"
+                _status_detail = {}
             else:
-                status = _check_snapshot_status(sid)
+                status, _status_detail = _check_snapshot_status(sid)
+                age_min = _snapshot_age_minutes(job.get("triggered_at_iso", ""))
+                state_label = _classify_snapshot_state({"snapshot_id": sid, "bd_status": status, "triggered_at": job.get("triggered_at_iso", "")})
+                age_str = f"{age_min:.0f}分経過" if age_min >= 0 else ""
                 print(
-                    f"  バッチ{bi}/{len(batches)} [{', '.join(batch_usernames[:2])}{"..." if len(batch_usernames)>2 else ""}]"
-                    f" snapshot_id={sid} → status={status}"
+                    f"  バッチ{bi}/{len(batches)} [{', '.join(batch_usernames[:2])}{'...' if len(batch_usernames)>2 else ''}]"
+                    f" snapshot_id={sid} → status={status} [{state_label}] {age_str}"
                 )
+                if _status_detail.get("error_message"):
+                    print(f"    ⚠️  error: {_status_detail['error_message']}")
 
             if status == "ready":
                 ok, items, dl_status = _download_snapshot(sid)

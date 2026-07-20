@@ -81,12 +81,18 @@ from prompts import (
     PATTERN_LAB_TEXT_KEYS,
     NORTH_STAR_DAILY_TEXT_KEYS,
     NORTH_STAR_DAILY_AI_KEYS,
+    TREND_CONTINUITY_TEXT_KEYS,
+    TREND_CONTINUITY_SYSTEM_PROMPT,
+    EDITORIAL_COMMENT_TEXT_KEYS,
+    EDITORIAL_COMMENT_SYSTEM_PROMPT,
     build_category_analysis_prompt,
     build_post_structure_analysis_prompt,
     build_core_hari_idea_prompt,
     build_success_factor_prompt,
     build_pattern_lab_prompt,
     build_north_star_daily_prompt,
+    build_trend_continuity_prompt,
+    build_editorial_comment_prompt,
 )
 
 MODEL_NAME = OPENAI_MODEL  # .envのOPENAI_MODELで変更可能。未設定時はgpt-4o-mini
@@ -353,6 +359,57 @@ def generate_north_star_daily(entries: list, validated_patterns: list = None) ->
     result["参考記事一覧"] = "\n".join(reference_urls) if reference_urls else "(なし)"
 
     return result
+
+
+def generate_editorial_comment(entries: list) -> dict:
+    """
+    編集長コメント(Research Candidate Sheet改善⑥)を生成する(2026-07-17追加)。
+    1回/実行。qualifying投稿(entries)全件のsuccess_factors結果を入力に、
+    EDITORIAL_COMMENT_TEXT_KEYSの4項目を出力する。
+
+    entries: [{"post":..., "success_factors":..., ...}] 形式
+    戻り値: EDITORIAL_COMMENT_TEXT_KEYSの各キーを含む辞書。
+            entriesが空の場合はall-emptyの辞書を返す(エラーにしない)。
+    """
+    if not entries:
+        return {key: "" for key in EDITORIAL_COMMENT_TEXT_KEYS}
+
+    prompt = build_editorial_comment_prompt(entries)
+    content = _call_openai(
+        prompt,
+        system_prompt=EDITORIAL_COMMENT_SYSTEM_PROMPT,
+        label="editorial comment",
+    )
+
+    parsed = _parse_response_content(content, list(EDITORIAL_COMMENT_TEXT_KEYS))
+    return {key: str(parsed.get(key, "")).strip() for key in EDITORIAL_COMMENT_TEXT_KEYS}
+
+
+def generate_trend_continuity_report(entries_by_day: dict, total_posts: int) -> dict:
+    """
+    直近10日間のsuccess_factorsデータからトレンド継続性分析を生成する(2026-07-17追加)。
+    1回/実行。individual AI分析のゲート(ANALYSIS_MIN_SCORE)とは独立して、毎実行必ず呼ばれる。
+
+    entries_by_day: {"YYYY-MM-DD": [{"タイトル":..., "冒頭3秒のフック":...,
+                                     "伸びた理由":..., "心理トリガー":..., "CTA":...}]}
+                    sheets_writer.get_recent_success_factors()の戻り値のキー。
+    total_posts: 分析対象の総投稿数。
+
+    戻り値: TREND_CONTINUITY_TEXT_KEYSの各キーを含む辞書。
+            データ不足の場合はall-emptyの辞書を返す(エラーにしない)。
+    """
+    if not entries_by_day or total_posts == 0:
+        return {key: "" for key in TREND_CONTINUITY_TEXT_KEYS}
+
+    prompt = build_trend_continuity_prompt(entries_by_day, total_posts)
+    content = _call_openai(
+        prompt,
+        system_prompt=TREND_CONTINUITY_SYSTEM_PROMPT,
+        label="trend continuity",
+    )
+
+    parsed = _parse_response_content(content, list(TREND_CONTINUITY_TEXT_KEYS))
+    return {key: str(parsed.get(key, "")).strip() for key in TREND_CONTINUITY_TEXT_KEYS}
 
 
 # ── Expert Interview ──────────────────────────────────────────────────────────

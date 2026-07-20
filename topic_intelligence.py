@@ -384,6 +384,24 @@ def _print_hook_card(rank: int, c: dict) -> None:
         extra = f"  [{perspective}]" + (f" / [{angle}]" if angle else "")
         print(f"  CORE HARI視点:{extra}")
 
+    # 根拠レベル・情報源（trend_evidence.gather_evidence が付与している場合のみ）
+    level = c.get("trend_level", "")
+    if level:
+        from trend_evidence import LEVEL_LABELS, format_evidence_block
+        print()
+        print(f"  ─ 根拠レベル: {LEVEL_LABELS.get(level, level)} ─")
+        ig_ev = c.get("instagram_evidence", "")
+        if ig_ev and ig_ev != "0件（直近45日以内の一致投稿なし）":
+            print(f"  Instagram: {ig_ev.splitlines()[0]}")
+        seasonal_ev = c.get("seasonal_evidence", "")
+        if seasonal_ev and seasonal_ev != "なし":
+            print(f"  季節性: {seasonal_ev[:60]}")
+        own_ev = c.get("own_account_evidence", "")
+        if own_ev and own_ev != "0件":
+            print(f"  過去実績: {own_ev[:60]}")
+        if level == "E":
+            print("  ⚠️  AIオリジナル案／トレンド未確認")
+
 
 def print_topic_candidates(candidates: list) -> None:
     """Phase 1 出力。1位のHookだけ表示する（別案は select_topic_interactive で対話的に表示）。"""

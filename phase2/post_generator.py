@@ -183,33 +183,99 @@ def _extract_editor_memo(content: str) -> dict:
     }
 
 
-def _build_editor_memo_md(content: str, handoff: dict) -> str:
+def _build_trend_evidence_md(handoff: dict) -> str:
     """
-    Markdownに挿入する「編集メモ」ブロックを構築する。
-    AIが【編集メモ】を出力していれば使い、なければhandoffから最低限の情報で組み立てる。
+    handoffに付与された証拠情報から「この企画を選んだ根拠」ブロックを構築する。
     """
-    raw = _extract_section(content, "【編集メモ】")
-    if raw and len(raw) > 100:
-        # AIが出力した内容をそのまま使う（先頭の見出し行を含む）
-        return raw.strip()
+    try:
+        from trend_evidence import LEVEL_LABELS
+    except ImportError:
+        LEVEL_LABELS = {}
 
-    # フォールバック: handoffから構築
-    hook      = handoff.get("hook", "")
-    post_type = handoff.get("post_type", "")
-    topic     = handoff.get("topic", "")
+    level      = handoff.get("trend_level", "E")
+    sources    = handoff.get("trend_sources", "")
+    reason     = handoff.get("trend_reason", "")
+    checked_at = handoff.get("trend_checked_at", "")
+    ref_urls   = handoff.get("reference_urls", "")
+    own_ev     = handoff.get("own_account_evidence", "0件")
+    ai_flag    = handoff.get("ai_original_flag", "1") == "1"
+
+    default_labels = {
+        "A": "A: 複数媒体で話題",
+        "B": "B: 1媒体で強い反応",
+        "C": "C: 季節性・社会背景あり",
+        "D": "D: 過去実績あり",
+        "E": "E: AIオリジナル／トレンド未確認",
+    }
+    label = (LEVEL_LABELS or default_labels).get(level, level)
+
     lines = [
-        "【編集メモ】",
+        "【この企画を選んだ根拠】",
         "",
-        f"**今日のテーマ:** {topic}",
-        f"**投稿目的:** {post_type}",
-        f"**選択Hook:** {hook}",
+        f"根拠レベル: {label}",
+        f"確認日時: {checked_at or '（未取得）'}",
         "",
-        "**参考投稿:** （AI出力なし）",
-        "**CORE HARIへ変更した点:** （AI出力なし）",
-        "**AI編集長コメント:** （AI出力なし）",
+        "話題の情報源:",
     ]
+    if sources:
+        for src in sources.splitlines():
+            lines.append(f"  {src}")
+    else:
+        lines.append("  （証拠収集なし）")
+
+    lines.append("")
+    if ref_urls:
+        lines.append("参考URL:")
+        for u in ref_urls.splitlines()[:3]:
+            if u:
+                lines.append(f"  {u}")
+        lines.append("")
+
+    lines.append(f"自分の過去実績: {own_ev or '0件'}")
+    lines.append(f"AIオリジナルか: {'はい — トレンド未確認' if ai_flag else 'いいえ — 外部根拠あり'}")
+
+    if reason:
+        lines.append("")
+        lines.append(f"採用理由: {reason}")
+
     return "\n".join(lines)
 
+
+def _build_editor_memo_md(content: str, handoff: dict) -> str:
+    """
+    Markdownへ挿入する編集メモブロックを構築する。
+    AIの【編集メモ】出力 + handoffの証拠情報を結合する。
+    """
+    raw = _extract_section(content, "【編集メモ】")
+
+    # 証拠ブロック（常に付与）
+    try:
+        evidence_block = _build_trend_evidence_md(handoff)
+    except Exception:
+        evidence_block = ""
+
+    if raw and len(raw) > 100:
+        memo_part = raw.strip()
+    else:
+        hook      = handoff.get("hook", "")
+        post_type = handoff.get("post_type", "")
+        topic     = handoff.get("topic", "")
+        fallback_lines = [
+            "【編集メモ】",
+            "",
+            f"**今日のテーマ:** {topic}",
+            f"**投稿目的:** {post_type}",
+            f"**選択Hook:** {hook}",
+            "",
+            "**参考投稿:** （AI出力なし）",
+            "**CORE HARIへ変更した点:** （AI出力なし）",
+            "**AI編集長コメント:** （AI出力なし）",
+        ]
+        memo_part = "\n".join(fallback_lines)
+
+    if evidence_block:
+        return memo_part + "\n\n" + evidence_block
+    return memo_part
 
 def _extract_caption_plain(content: str) -> str:
     """② キャプションセクションから本文のみを返す（Markdown・文字数記載を除去）。"""
@@ -348,6 +414,22 @@ def _build_reel_script_entry(
         "reference_reason_3":    memo.get("ref_reason_3", ""),
         "corehari_changes":      memo.get("corehari_changes", ""),
         "editor_comment":        memo.get("editor_comment", ""),
+        "trend_source":          handoff.get("trend_sources", ""),
+        "trend_source_count":    str(handoff.get("trend_source_count", "")),
+        "trend_level":           handoff.get("trend_level", "E"),
+        "trend_reason":          handoff.get("trend_reason", ""),
+        "trend_checked_at":      handoff.get("trend_checked_at", ""),
+        "reference_urls":        handoff.get("reference_urls", ""),
+        "reference_dates":       handoff.get("reference_dates", ""),
+        "instagram_evidence":    handoff.get("instagram_evidence", ""),
+        "x_evidence":            "未取得",
+        "threads_evidence":      "未取得",
+        "google_trends_evidence": "未取得",
+        "news_evidence":         "未取得",
+        "seasonal_evidence":     handoff.get("seasonal_evidence", ""),
+        "own_account_evidence":  handoff.get("own_account_evidence", ""),
+        "competitor_evidence":   "未取得",
+        "ai_original_flag":      handoff.get("ai_original_flag", "1"),
         "posted":                "未投稿",
         "posted_at":             "",
         "instagram_url":         "",

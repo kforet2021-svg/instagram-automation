@@ -562,16 +562,24 @@ def _run_log_recovered(snapshot_meta: list) -> None:
 
 def _fetch_raw_posts(label: str, fetch_func) -> tuple:
     """
-    (posts: list, snapshot_meta: list) のタプルを返す。
-    fetch_func が dict {"posts": ..., "snapshot_meta": ...} を返す場合は展開し、
+    (posts: list, snapshot_meta: list, bd_outage: bool, outage_reason: str) の4要素タプルを返す。
+    fetch_func が dict {"posts": ..., "snapshot_meta": ..., "bd_outage": ...} を返す場合は展開。
     list を返す旧形式にも後方互換で対応する。
+    bd_outage=True のとき Bright Data 障害モード（Instagram取得なしで続行）。
     """
     print(f"{label}の投稿を取得中...")
     try:
         result = fetch_func()
         if isinstance(result, dict):
-            return result.get("posts", []), result.get("snapshot_meta", [])
-        return result, []  # 旧形式後方互換
+            bd_outage = result.get("bd_outage", False)
+            outage_reason = result.get("outage_reason", "")
+            return (
+                result.get("posts", []),
+                result.get("snapshot_meta", []),
+                bd_outage,
+                outage_reason,
+            )
+        return result, [], False, ""  # 旧形式後方互換
     except Exception as e:
         print(f"{label}投稿の取得中にエラーが発生しました: {e}")
         sys.exit(1)
@@ -1401,7 +1409,41 @@ def main() -> None:
     # 1. Instagram全体トレンドの投稿を取得(①全体トレンド+②美容ジャンルトレンドを
     #    1回の取得でまとめて行う。2026-07-02(item5): Bright Dataへの取得を増やさず、
     #    美容ジャンルアカウント由来の投稿だけを事後的にCATEGORY_BEAUTYへ再分類する)
-    raw_posts, snapshot_meta = _fetch_raw_posts(CATEGORY_ALL, lambda: fetch_trend_posts(accounts))
+    raw_posts, snapshot_meta, _bd_outage, _outage_reason = _fetch_raw_posts(
+        CATEGORY_ALL, lambda: fetch_trend_posts(accounts)
+    )
+
+    # ── Bright Data 障害モード ─────────────────────────────────────────────
+    if _bd_outage:
+        print()
+        print("=" * 70)
+        print("【Bright Data 障害モード】Instagram取得をスキップして続行します")
+        print(_outage_reason)
+        print()
+        print("  Trend Analysis・Research Candidate Score はスキップします。")
+        print("  Creator Studio（投稿生成）はInstagram根拠なしで実行できます。")
+        print("=" * 70)
+        print()
+        # Instagram根拠なしで Creator Studio だけ実行
+        try:
+            if _budget_ok("Creator Studio（障害モード）"):
+                cs_result = generate_creator_studio_daily()
+                if cs_result:
+                    print_creator_studio_summary(cs_result)
+        except Exception as e:
+            print(f"Creator Studio（障害モード）実行中にエラーが発生しました: {e}")
+        _run_log_from_snapshot_meta(
+            snapshot_meta=snapshot_meta,
+            accounts=accounts,
+            fetched_count=0,
+            pool_count=0,
+            post_generated=False,
+            registered_count=len(list(ANTENNA_ACCOUNTS)),
+        )
+        print()
+        print("すべての処理が完了しました（Bright Data 障害モード）")
+        sys.exit(0)
+
     apply_beauty_category(raw_posts, ANTENNA_ACCOUNTS_BEAUTY)
 
     # 2. 構造的に使える投稿だけをプールとして抜き出す

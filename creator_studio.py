@@ -2712,6 +2712,14 @@ def generate_phase1_daily() -> dict:
         hook_library_text=hook_lib_text,
     )
 
+    # 証拠収集（取得できる情報源のみ; 失敗しても候補を消さない）
+    try:
+        from trend_evidence import gather_evidence
+        print("  ③ 根拠チェック中（Instagram実績・季節性）...")
+        candidates = gather_evidence(candidates, world_ctx)
+    except Exception as _ev_err:
+        print(f"  ⚠️  根拠チェック失敗（スキップ）: {_ev_err}")
+
     ti.print_topic_candidates(candidates)
 
     # ── ③ ユーザーがHookを選択 ──────────────────────────────────────────
@@ -3134,6 +3142,19 @@ def _print_chatgpt_handoff(
                 for r in refs
             ],
         )
+        # 選択Hookの証拠情報をhandoffに付与（_build_reel_script_entry / 編集メモで使用）
+        if selected:
+            handoff["trend_level"]    = selected.get("trend_level", "E")
+            handoff["trend_sources"]  = selected.get("trend_sources", "")
+            handoff["trend_reason"]   = selected.get("trend_reason", "")
+            handoff["trend_checked_at"] = selected.get("trend_checked_at", "")
+            handoff["reference_urls"] = selected.get("reference_urls", "")
+            handoff["reference_dates"] = selected.get("reference_dates", "")
+            handoff["instagram_evidence"]     = selected.get("instagram_evidence", "")
+            handoff["seasonal_evidence"]      = selected.get("seasonal_evidence", "")
+            handoff["own_account_evidence"]   = selected.get("own_account_evidence", "")
+            handoff["ai_original_flag"]       = selected.get("ai_original_flag", "1")
+            handoff["trend_source_count"]     = selected.get("trend_source_count", 0)
 
         # _DRY_RUN はモジュール変数（main.py から設定）
         dry_run = globals().get("_DRY_RUN", False)
