@@ -218,12 +218,16 @@ CATEGORY_BEAUTY = "美容ジャンルトレンド"
 RECENT_DAYS = 20
 
 # --- テストモード ---
-# 大量取得でのタイムアウトを避けるため、安定動作を確認できるまでは
-# 1回の実行で最大TEST_MODE_MAX_TOTAL_ACCOUNTS件までしか取得しないようにする。
-# 安定して動くことを確認できたら TEST_MODE = False に変更すれば、
-# accounts.py の ANTENNA_ACCOUNTS 全件を取得対象にできる。
-TEST_MODE = True
+# 2026-07-20: TEST_MODE を False（本番）に変更。
+# 環境変数 BRIGHT_DATA_TEST_MODE=1 を設定することでテスト実行も可能。
+# テストモード時は TEST_MODE_MAX_TOTAL_ACCOUNTS 件だけ取得する。
+TEST_MODE = os.environ.get("BRIGHT_DATA_TEST_MODE", "").lower() in ("1", "true", "yes")
 TEST_MODE_MAX_TOTAL_ACCOUNTS = 5
+
+# --- ドライランモード ---
+# main.py から DRY_RUN = True を設定すると、Bright Data API を呼ばずに
+# 取得予定のアカウント一覧とバッチ計画だけを表示して終了する。
+DRY_RUN = False
 
 _session = None
 
@@ -292,17 +296,20 @@ def _apply_test_mode_limit(usernames: list, category: str) -> list:
     """
     TEST_MODE中は、1回の実行でTEST_MODE_MAX_TOTAL_ACCOUNTS件までしか
     アカウントを取得対象にしない。
+    本番モード(TEST_MODE=False)かつ登録アカウント > 5件なのに
+    対象が5件以下になっていたら設定ミス警告を出す(処理は続ける)。
     """
-    if not TEST_MODE:
-        return usernames
+    if TEST_MODE:
+        limited = usernames[:TEST_MODE_MAX_TOTAL_ACCOUNTS]
+        if len(limited) < len(usernames):
+            print(
+                f"[テストモード] {category}: 登録{len(usernames)}件中{len(limited)}件のみ取得 "
+                f"(BRIGHT_DATA_TEST_MODE=1 または TEST_MODE=True)"
+            )
+        return limited
 
-    limited = usernames[:TEST_MODE_MAX_TOTAL_ACCOUNTS]
-    if len(limited) < len(usernames):
-        print(
-            f"{category}: テストモード(最大{TEST_MODE_MAX_TOTAL_ACCOUNTS}アカウントまで)のため、"
-            f"{len(usernames)}件中{len(limited)}件のみ取得します"
-        )
-    return limited
+    # 本番モード: 全件対象
+    return usernames
 
 
 def _get_value(obj, key: str, default=None):
@@ -831,6 +838,96 @@ def _trigger_and_collect(
     return True, items, snapshot_id, "ready"
 
 
+def _print_batch_fetch_summary(
+    posts: list,
+    snapshot_meta: list,
+    batches: list,
+    failed_accounts: list,
+    category: str,
+) -> None:
+    """
+    全バッチ完了後にアカウント別・バッチ別の取得結果サマリーを表示する。
+    【2026-07-20追加】
+    """
+    # アカウント別取得件数
+    account_counts: dict[str, int] = {}
+    for p in posts:
+        if p.get("fetch_error"):
+            continue
+        acct = (p.get("source_account") or p.get("username") or "").strip().lower()
+        if acct:
+            account_counts[acct] = account_counts.get(acct, 0) + 1
+
+    # バッチ別取得件数
+    batch_post_counts: dict[str, int] = {}
+    for meta in snapshot_meta:
+        batch_accounts = [a.lower() for a in meta.get("accounts", [])]
+        count = sum(account_counts.get(a, 0) for a in batch_accounts)
+        batch_post_counts[meta.get("batch_key", "")] = count
+
+    failed_set = {a.lower() for a in failed_accounts}
+
+    print()
+    print("=" * 60)
+    print("【取得結果サマリー】")
+    print()
+
+    # ① アカウント別
+    all_batch_accounts = [u for batch in batches for u in batch]
+    print("  アカウント別取得件数:")
+    for acct in all_batch_accounts:
+        cnt = account_counts.get(acct.lower(), 0)
+        status = "失敗" if acct.lower() in failed_set else ("0件" if cnt == 0 else f"{cnt}件")
+        print(f"    {acct}: {status}")
+
+    print()
+
+    # ② バッチ別
+    print("  バッチ別結果:")
+    for bi, (meta, batch) in enumerate(zip(snapshot_meta, batches), 1):
+        bd_status = meta.get("bd_status", "")
+        acct_names = ", ".join(batch)
+        batch_key = "|".join(sorted(batch))
+        cnt = batch_post_counts.get(batch_key, 0)
+        status_label = "成功" if bd_status == "ready" else bd_status
+        print(f"    バッチ{bi}/{len(batches)} [{status_label}] {acct_names} → {cnt}件")
+
+    # スキップされたバッチ（snapshot_metaにない）
+    if len(snapshot_meta) < len(batches):
+        for bi in range(len(snapshot_meta) + 1, len(batches) + 1):
+            print(f"    バッチ{bi}/{len(batches)} [スキップ] (全体タイムアウトにより未実行)")
+
+    print()
+
+    # ③ 集計
+    completed = sum(1 for m in snapshot_meta if m.get("bd_status") == "ready")
+    failed = sum(1 for m in snapshot_meta if m.get("bd_status") not in ("ready", "recovered"))
+    skipped = len(batches) - len(snapshot_meta)
+    succeeded_accounts = len(
+        {a.lower() for a in all_batch_accounts if a.lower() not in failed_set and account_counts.get(a.lower(), 0) > 0}
+    )
+    print(f"  完了バッチ: {completed}/{len(batches)}件")
+    if failed:
+        print(f"  失敗バッチ: {failed}件")
+    if skipped:
+        print(f"  スキップ:   {skipped}件 (全体タイムアウト)")
+    print(f"  取得成功アカウント: {succeeded_accounts}/{len(all_batch_accounts)}件")
+    print(f"  取得投稿合計: {len([p for p in posts if not p.get('fetch_error')])}件")
+
+    # ⑥ 取得できたアカウントが5未満の場合は警告
+    if succeeded_accounts < 5 and len(all_batch_accounts) >= 5:
+        print()
+        print("  ⚠️  取得処理に異常がある可能性があります")
+        print(f"     実際に取得できたアカウント: {succeeded_accounts}件 / 対象: {len(all_batch_accounts)}件")
+        if TEST_MODE:
+            print("     テストモードが有効です (BRIGHT_DATA_TEST_MODE=1)")
+        else:
+            print("     Bright Data API の状態・ネットワーク接続を確認してください")
+
+    print("=" * 60)
+    print()
+
+
 def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int) -> dict:
     """
     2026-07-18: 戻り値を list から dict に変更。
@@ -851,6 +948,7 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
     posts = []
     snapshot_meta = []
 
+    registered_count = len([a for a in accounts if a and a.strip()])
     usernames = [_to_username(a) for a in accounts if a and a.strip()]
     if not usernames:
         print(f"{category}: 取得対象アカウントが0件です(競合発見の結果0件、または該当カテゴリで競合候補が見つかりませんでした)")
@@ -859,6 +957,18 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
     usernames = _apply_test_mode_limit(usernames, category)
     if not usernames:
         return {"posts": posts, "snapshot_meta": snapshot_meta}
+
+    # 本番モードなのに対象が5件以下で登録アカウントが多い場合は設定ミスの可能性を警告
+    if not TEST_MODE and len(usernames) <= 5 and registered_count > 5:
+        print()
+        print("=" * 60)
+        print("⚠️  警告: 取得処理に異常がある可能性があります")
+        print(f"   登録アカウント数: {registered_count}件")
+        print(f"   今回の対象数: {len(usernames)}件")
+        print("   テストモード設定またはアカウント上限が残っています")
+        print("   BRIGHT_DATA_TEST_MODE 環境変数を確認してください")
+        print("=" * 60)
+        print()
 
     # 直近RECENT_DAYS日より古いリールは取得時点で除外し、無駄な取得コストを減らす
     now = dt.datetime.now(dt.timezone.utc)
@@ -872,6 +982,31 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
         usernames[i : i + ACCOUNTS_PER_BATCH]
         for i in range(0, len(usernames), ACCOUNTS_PER_BATCH)
     ]
+
+    # ── 実行モード表示 ────────────────────────────────────────────────────────
+    mode_label = "テスト" if TEST_MODE else "本番"
+    print()
+    print("=" * 60)
+    print(f"実行モード          : {mode_label}")
+    print(f"登録アカウント数    : {registered_count}件")
+    print(f"今回の対象アカウント: {len(usernames)}件")
+    print(f"バッチ数            : {len(batches)}バッチ (1バッチ最大{ACCOUNTS_PER_BATCH}件)")
+    print()
+    print("【対象アカウント一覧】")
+    for i, u in enumerate(usernames, 1):
+        print(f"  {i:2}. {u}")
+    print()
+    print("【バッチ計画】")
+    for bi, batch in enumerate(batches, 1):
+        print(f"  バッチ{bi}/{len(batches)}: {', '.join(batch)}")
+    print("=" * 60)
+    print()
+
+    # ── ドライランモード: APIを呼ばずに終了 ──────────────────────────────────
+    if DRY_RUN:
+        print("[ドライラン] Bright Data API は呼び出しません。計画の確認が完了しました。")
+        print("[ドライラン] 本番実行するには --dry-run オプションを外してください。")
+        return {"posts": [], "snapshot_meta": [], "dry_run": True}
 
     print(
         f"取得中: {category} / {len(usernames)}アカウントを{len(batches)}バッチに分割"
@@ -1118,6 +1253,9 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             f"{category}: 取得失敗(ジョブ失敗/タイムアウト)したアカウント"
             f"({len(failed_accounts)}件): {', '.join(failed_accounts)}"
         )
+
+    # ── バッチ完了サマリー ────────────────────────────────────────────────────
+    _print_batch_fetch_summary(posts, snapshot_meta, batches, failed_accounts, category)
 
     # 2026-07-18: 未完了ジョブ情報を書き戻す(変更があった場合のみ)
     if updated_pending != pending:

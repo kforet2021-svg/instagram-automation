@@ -305,12 +305,16 @@ from openai_analyzer import (
     analyze_success_factors,
     generate_pattern_lab_content,
     generate_north_star_daily,
+    generate_trend_continuity_report,
+    generate_editorial_comment,
 )
 from sheets_writer import (
     save_raw_fetch_log,
     save_adopted_posts,
     save_rankings,
     save_trend_analysis,
+    save_trend_analysis_no_data,
+    save_run_log,
     save_category_trend_summary,
     save_daily_content_picks,
     get_recent_pick_categories,
@@ -328,6 +332,9 @@ from sheets_writer import (
     upsert_mention_tracker,
     remove_from_mention_tracker,
     save_north_star_daily,
+    get_recent_success_factors,
+    save_trend_continuity_report,
+    save_editorial_comment,
     save_research_sources,
     ensure_creator_intelligence_library_sheets,
     ensure_manual_post_results_sheet,
@@ -347,10 +354,22 @@ from research_candidate_score import (
     score_posts,
     sort_by_score,
     select_for_analysis,
+    split_by_views_availability,
+    sort_no_views_by_engagement,
+    limit_per_account,
+    compute_account_stats,
+    interleave_by_account,
     TOP_N_FOR_ANALYSIS,
+    MAX_POSTS_PER_ACCOUNT,
+    MIN_ACCOUNTS_FOR_TREND,
     TIER_MUST_ANALYZE,
     TIER_CANDIDATE,
+    TIER_PENDING,
     TIER_SAVE_ONLY,
+    filter_by_window,
+    RESEARCH_WINDOW_DAYS,
+    MIN_CANDIDATE_POSTS,
+    ANALYSIS_MIN_SCORE,
 )
 
 STATS_LOG_ORDER = [
@@ -369,10 +388,190 @@ def _print_stats(label: str, stats: dict) -> None:
         print(f"{jp_label}: {stats.get(key, 0)}")
 
 
-def _fetch_raw_posts(label: str, fetch_func) -> list:
+def _print_pool_exclusion_summary(stats: dict, raw_posts: list, pool: list) -> None:
+    """
+    build_post_pool 後の除外理由集計とResearch Candidate残留アカウント別件数を表示する。
+    【2026-07-20追加】
+    """
+    print()
+    print("=" * 60)
+    print("【除外理由の集計】")
+    labels = [
+        ("excluded_date",             "期間外（投稿日が古い）"),
+        ("excluded_not_reel",         "リール以外"),
+        ("excluded_pr",               "PR投稿"),
+        ("excluded_product_reviewer", "商品レビュー主体"),
+        ("excluded_fetch_error",      "取得失敗"),
+    ]
+    for key, label in labels:
+        cnt = stats.get(key, 0)
+        if cnt:
+            print(f"  {label}: {cnt}件")
+
+    print()
+    print("【Research Candidateへ残った件数】")
+    print(f"  合計: {stats.get('pool_count', 0)}件")
+
+    # アカウント別残留件数
+    acct_counts: dict[str, int] = {}
+    for p in pool:
+        acct = (p.get("source_account") or p.get("username") or "").strip()
+        if acct:
+            acct_counts[acct] = acct_counts.get(acct, 0) + 1
+    if acct_counts:
+        print("  アカウント別:")
+        for acct, cnt in sorted(acct_counts.items(), key=lambda x: -x[1]):
+            print(f"    {acct}: {cnt}件")
+
+    # スコア不足は select_for_analysis で決まるため pool 段階ではまだ計算できない
+    # → ここでは pool 件数まで表示してスコア不足は後段ログに委ねる
+
+    print("=" * 60)
+    print()
+
+
+def _run_log_from_snapshot_meta(
+    snapshot_meta: list,
+    accounts: list,
+    fetched_count: int,
+    pool_count: int,
+    post_generated: bool,
+    registered_count: int = 0,
+) -> None:
+    """
+    2026-07-18: snapshot_metaの各バッチ情報をもとにrun_logへ保存する。
+    回収完了(recovered=True)のバッチは _run_log_recovered で別途処理するため
+    ここでは除外する。
+
+    snapshot_metaが空の場合(全バッチ未着手など)は1行だけ保存する。
+
+    【2026-07-20】実行モード・登録アカウント数・バッチ統計をrun_logに追加。
+    """
+    import bright_data_fetcher as _bdf
+    mode_label = "テスト" if _bdf.TEST_MODE else "本番"
+    total_batches = len(snapshot_meta)
+    completed_batches = sum(1 for m in snapshot_meta if m.get("bd_status") == "ready")
+    failed_batches = sum(1 for m in snapshot_meta if m.get("bd_status") not in ("ready", "recovered"))
+
+    non_recovered = [m for m in snapshot_meta if not m.get("recovered")]
+    if not non_recovered:
+        # snapshot_metaが完全に空(アカウント0件など)でも1行保存する
+        try:
+            save_run_log({
+                "処理種別": "通常実行",
+                "対象アカウント": f"{len(accounts)}アカウント",
+                "snapshot_id": "-",
+                "Bright Data status": "アカウント0件",
+                "取得件数": fetched_count,
+                "保存件数": pool_count,
+                "未回収": "なし",
+                "エラー内容": "-",
+                "次回確認が必要か": "いいえ",
+                "投稿生成を実行したか": "はい" if post_generated else "いいえ",
+                "実行モード": mode_label,
+                "登録アカウント数": registered_count or len(accounts),
+                "対象アカウント数": len(accounts),
+                "実行バッチ数": total_batches,
+                "完了バッチ数": completed_batches,
+                "失敗バッチ数": failed_batches,
+            })
+        except Exception as e:
+            print(f"run_log保存中にエラーが発生しました: {e}")
+        return
+
+    for meta in non_recovered:
+        bd_status = meta.get("bd_status", "")
+        snapshot_id = meta.get("snapshot_id") or "-"
+        error_msg = meta.get("error_msg", "")
+
+        if bd_status == "ready":
+            処理種別 = "通常実行"
+            未回収 = "なし"
+            次回確認 = "いいえ"
+        elif bd_status == "running":
+            処理種別 = "Instagram取得0件（未回収）"
+            未回収 = "はい"
+            次回確認 = "はい"
+            if not error_msg:
+                error_msg = "Bright Dataジョブはstatus=runningのまま待機時間を超過。結果未回収"
+        elif bd_status == "failed":
+            処理種別 = "Instagram取得0件（APIエラー）"
+            未回収 = "なし"
+            次回確認 = "いいえ"
+            if not error_msg:
+                error_msg = "Bright Data APIエラー（status=failed）"
+        elif bd_status == "trigger_failed":
+            処理種別 = "Instagram取得0件（trigger失敗）"
+            未回収 = "なし"
+            次回確認 = "いいえ"
+            if not error_msg:
+                error_msg = "Bright Data triggerに失敗（snapshot_id未取得）"
+        else:
+            処理種別 = f"Instagram取得0件（{bd_status}）"
+            未回収 = "不明"
+            次回確認 = "いいえ"
+
+        try:
+            save_run_log({
+                "処理種別": 処理種別,
+                "対象アカウント": f"{len(meta.get('accounts', []))}アカウント",
+                "snapshot_id": snapshot_id,
+                "Bright Data status": bd_status,
+                "取得件数": fetched_count,
+                "保存件数": pool_count,
+                "未回収": 未回収,
+                "エラー内容": error_msg or "-",
+                "次回確認が必要か": 次回確認,
+                "投稿生成を実行したか": "はい" if post_generated else "いいえ",
+                "実行モード": mode_label,
+                "登録アカウント数": registered_count or len(accounts),
+                "対象アカウント数": len(accounts),
+                "実行バッチ数": total_batches,
+                "完了バッチ数": completed_batches,
+                "失敗バッチ数": failed_batches,
+            })
+        except Exception as e:
+            print(f"run_log保存中にエラーが発生しました: {e}")
+
+
+def _run_log_recovered(snapshot_meta: list) -> None:
+    """
+    2026-07-18: 前回pending→今回ready(回収完了)になったバッチを
+    run_logに「回収完了」行として追記する。元のsnapshot_idとの関連が分かるよう記録する。
+    """
+    recovered = [m for m in snapshot_meta if m.get("recovered")]
+    for meta in recovered:
+        snapshot_id = meta.get("snapshot_id") or "-"
+        count = meta.get("recovered_count", 0)
+        try:
+            save_run_log({
+                "処理種別": "回収完了（前回pending→今回ready）",
+                "対象アカウント": f"{len(meta.get('accounts', []))}アカウント",
+                "snapshot_id": snapshot_id,
+                "Bright Data status": "recovered",
+                "取得件数": count,
+                "保存件数": count,
+                "未回収": "なし",
+                "エラー内容": f"前回未回収snapshot_id={snapshot_id}を今回回収完了",
+                "次回確認が必要か": "いいえ",
+                "投稿生成を実行したか": "いいえ",
+            })
+        except Exception as e:
+            print(f"run_log(回収完了)保存中にエラーが発生しました: {e}")
+
+
+def _fetch_raw_posts(label: str, fetch_func) -> tuple:
+    """
+    (posts: list, snapshot_meta: list) のタプルを返す。
+    fetch_func が dict {"posts": ..., "snapshot_meta": ...} を返す場合は展開し、
+    list を返す旧形式にも後方互換で対応する。
+    """
     print(f"{label}の投稿を取得中...")
     try:
-        return fetch_func()
+        result = fetch_func()
+        if isinstance(result, dict):
+            return result.get("posts", []), result.get("snapshot_meta", [])
+        return result, []  # 旧形式後方互換
     except Exception as e:
         print(f"{label}投稿の取得中にエラーが発生しました: {e}")
         sys.exit(1)
@@ -493,7 +692,7 @@ def _score_and_analyze_posts(posts: list) -> None:
     継続する。
     """
     if not posts:
-        return
+        return []
 
     # 2026-07-01: 実行開始時にSTALE自動遷移を行う(last_seen_at >= 30日前のVALIDATEDをSTALEに)
     try:
@@ -501,42 +700,132 @@ def _score_and_analyze_posts(posts: list) -> None:
     except Exception as e:
         print(f"STALE自動遷移中にエラーが発生しました: {e}")
 
-    score_posts(posts)  # 各postに post["research_candidate_score"] を付与する(in-place)
-    sort_by_score(posts)  # Research Candidate Score合計が高い順に並べ替える(in-place)
+    # 2026-07-18: ① スコア計算は全件に対して行い、その後で期間フィルタを適用する
+    score_posts(posts)
 
+    # 2026-07-18: ① 分析対象を直近RESEARCH_WINDOW_DAYS日以内の投稿に絞り込む
+    within_posts, period_excluded = filter_by_window(posts, RESEARCH_WINDOW_DAYS)
+
+    # 2026-07-18: ④ 再生数あり/なしに分類し、再生数なし投稿に除外理由を付与
+    sort_by_score(within_posts)
+    with_views_posts, without_views_posts = split_by_views_availability(within_posts)
+    for p in without_views_posts:
+        if not p.get("pool_exclusion_reason"):
+            p["pool_exclusion_reason"] = "再生数未取得"
+
+    # 2026-07-18: 同一アカウント上限(最大2件/アカウント)を再生数あり投稿のみに適用
+    accepted_posts, acct_excluded = limit_per_account(with_views_posts, MAX_POSTS_PER_ACCOUNT)
+    if acct_excluded:
+        print(
+            f"同一アカウント上限({MAX_POSTS_PER_ACCOUNT}件/アカウント)により"
+            f"{len(acct_excluded)}件を除外しました"
+        )
+
+    # スコア不足投稿に除外理由を付与（AI分析ゲートを通らない投稿）
+    for p in accepted_posts:
+        score_total = (p.get("research_candidate_score") or {}).get("total", 0)
+        if score_total < ANALYSIS_MIN_SCORE and not p.get("pool_exclusion_reason"):
+            p["pool_exclusion_reason"] = "スコア不足"
+
+    # ⑧ ランキング表示用にアカウントが連続しないよう並び替え
+    interleaved_posts = interleave_by_account(accepted_posts)
+
+    # 2026-07-18: ⑥ 集計表示（6項目）
+    total_fetched = len(posts)
+    total_within = len(within_posts)
+    total_with_views = len(with_views_posts)
+    views_rate = total_with_views / total_within * 100 if total_within else 0.0
+    acct_stats = compute_account_stats(accepted_posts)
+    print(
+        f"\n--- Research Candidate 集計 ---\n"
+        f"  取得投稿数:       {total_fetched}件\n"
+        f"  期間外除外:       {len(period_excluded)}件（直近{RESEARCH_WINDOW_DAYS}日より前）\n"
+        f"  再生数取得率:     {total_with_views}/{total_within}件 ({views_rate:.1f}%)\n"
+        f"  分析対象投稿数:   {len(accepted_posts)}件\n"
+        f"  対象アカウント数: {acct_stats['account_count']}アカウント"
+    )
+    if len(accepted_posts) < MIN_CANDIDATE_POSTS:
+        print(
+            f"  ⚠ 分析対象が目標件数({MIN_CANDIDATE_POSTS}件)に達していません: "
+            f"{len(accepted_posts)}件"
+        )
+    if not acct_stats["has_min_accounts"]:
+        print(
+            f"  ⚠ サンプル不足: 分析アカウント数が{acct_stats['account_count']}件です"
+            f"（最低{MIN_ACCOUNTS_FOR_TREND}アカウント必要）"
+        )
+    if acct_stats["total_posts"] > 0:
+        pct = acct_stats["max_ratio"] * 100
+        print(
+            f"  最大アカウント占有率: {acct_stats['max_account']} "
+            f"{acct_stats['max_count']}/{acct_stats['total_posts']}件 {pct:.1f}%"
+        )
+        if acct_stats["has_bias"]:
+            print(
+                f"  ⚠ 偏りあり: {acct_stats['max_account']}が全体の{pct:.1f}%を占めています（20%超）"
+            )
+
+    # Research Candidatesシートに採用+除外の全件を保存
+    all_for_sheet = interleaved_posts + acct_excluded + without_views_posts + period_excluded
     try:
-        save_research_candidates(posts)
-        print(f"プール対象の{len(posts)}件全件のResearch Candidate Scoreをresearch_candidatesシートに保存しました(Research Candidate Score順)")
+        save_research_candidates(all_for_sheet)
+        print(
+            f"research_candidatesシートに全{len(all_for_sheet)}件を保存しました"
+            f"（採用{len(interleaved_posts)}件 / 除外{len(all_for_sheet) - len(interleaved_posts)}件）"
+        )
     except Exception as e:
         print(f"research_candidatesシートへの保存中にエラーが発生しました: {e}")
 
-    # 2026-07-01: 配点内訳(生値+得点)をresearch_candidate_score_debugシートに
-    # 保存する。「80点以上が0件だった」のような事象が起きた際に、再生数・
-    # いいね率などの生値が実際にどうだったのかを確認し、配点しきい値を
-    # 調整できるようにする。
+    # 配点内訳は採用済み投稿のみ（スコア計算済みのもの）
     try:
-        save_research_candidate_score_debug(posts)
-        print(f"プール対象の{len(posts)}件全件の配点内訳をresearch_candidate_score_debugシートに保存しました")
+        save_research_candidate_score_debug(accepted_posts)
+        print(f"配点内訳を{len(accepted_posts)}件分research_candidate_score_debugシートに保存しました")
     except Exception as e:
         print(f"research_candidate_score_debugシートへの保存中にエラーが発生しました: {e}")
 
-    tier_counts = {TIER_MUST_ANALYZE: 0, TIER_CANDIDATE: 0, TIER_SAVE_ONLY: 0}
-    for post in posts:
-        tier_counts[post["research_candidate_score"]["tier"]] += 1
+    # tier集計表示
+    tier_counts = {TIER_MUST_ANALYZE: 0, TIER_CANDIDATE: 0, TIER_SAVE_ONLY: 0, TIER_PENDING: 0}
+    for post in accepted_posts:
+        tier = post["research_candidate_score"].get("tier", TIER_SAVE_ONLY)
+        tier_counts[tier] = tier_counts.get(tier, 0) + 1
     print(
-        f"Research Candidate Score判定: {TIER_MUST_ANALYZE}{tier_counts[TIER_MUST_ANALYZE]}件 / "
+        f"Research Candidate Score判定: "
+        f"{TIER_MUST_ANALYZE}{tier_counts[TIER_MUST_ANALYZE]}件 / "
         f"{TIER_CANDIDATE}{tier_counts[TIER_CANDIDATE]}件 / "
-        f"{TIER_SAVE_ONLY}{tier_counts[TIER_SAVE_ONLY]}件"
+        f"{TIER_SAVE_ONLY}{tier_counts[TIER_SAVE_ONLY]}件 / "
+        f"{TIER_PENDING}(再生数なし){len(without_views_posts)}件"
     )
+    print(f"  → Research Candidate Ranking: {len(with_views_posts)}件 / Engagement参考候補: {len(without_views_posts)}件")
 
-    targets = select_for_analysis(posts)
+    # 2026-07-17: トレンド継続性分析 — 直近10日間のsuccess_factorsデータを読み込み、
+    # 継続トレンド/一時的な話題/飽和度を分析してtrend_continuityシートに保存する。
+    # individual AI分析のゲート(ANALYSIS_MIN_SCORE)とは独立して毎実行1回呼ばれる
+    # (データ不足時は空dictを保存してスキップ、エラーで他処理をブロックしない)。
+    try:
+        sf_data = get_recent_success_factors(days=10)
+        if sf_data.get("total_posts", 0) > 0:
+            print(f"トレンド継続性分析: 直近10日間 {sf_data['total_posts']}件のsuccess_factors → AI分析中...")
+            tc_result = generate_trend_continuity_report(
+                sf_data["entries_by_day"], sf_data["total_posts"]
+            )
+            save_trend_continuity_report(sf_data["period"], sf_data["total_posts"], tc_result)
+            print("トレンド継続性分析をtrend_continuityシートに保存しました")
+        else:
+            print("トレンド継続性分析: 直近10日間のsuccess_factorsデータが不足のためスキップ")
+    except Exception as e:
+        print(f"トレンド継続性分析中にエラーが発生しました: {e}")
+
+    targets = select_for_analysis(accepted_posts)
+    score_below_threshold = len(accepted_posts) - len(targets)
+    if score_below_threshold > 0:
+        print(f"  スコア不足（ANALYSIS_MIN_SCORE未満または商品販売系）: {score_below_threshold}件 → AI分析対象外")
     if not targets:
         # 2026-07-05: しきい値ゲート復活により、ANALYSIS_MIN_SCORE以上の投稿が
         # 1件もない日はここで0件になる。これはエラーではなく、「研究対象として
         # 価値がある投稿だけを分析する」という方針どおりの想定内の挙動なので、
         # 例外を投げずにこの実行のAI分析だけをスキップする。
         print("本日はResearch Candidate Scoreのしきい値を超える投稿がなかったため、AI個別分析はスキップしました")
-        return
+        return accepted_posts
 
     print(f"Research Candidate Score上位{len(targets)}件を個別にAI分析中(構造分析→投稿案生成→成功要因分析→SNS Pattern Lab素材生成)...")
     entries = []
@@ -575,7 +864,7 @@ def _score_and_analyze_posts(posts: list) -> None:
             print(f"投稿({post.get('url', '不明')})の個別分析中にエラーが発生しました: {e}")
 
     if not entries:
-        return
+        return accepted_posts
 
     try:
         save_post_analyses(entries)
@@ -668,6 +957,15 @@ def _score_and_analyze_posts(posts: list) -> None:
         north_star_daily_result = None
         print(f"North Star Dailyの生成・保存中にエラーが発生しました: {e}")
 
+    # 2026-07-17: Research Candidate Sheet改善⑥ 編集長コメント(1回/実行、+1 OpenAI)
+    # qualifying投稿全件のsuccess_factors結果を入力に、4項目を生成してeditorial_commentシートに保存。
+    try:
+        editorial_result = generate_editorial_comment(entries)
+        save_editorial_comment(entries, editorial_result)
+        print("編集長コメントをeditorial_commentシートに保存しました")
+    except Exception as e:
+        print(f"編集長コメントの生成・保存中にエラーが発生しました: {e}")
+
     # 2026-07-04(6回目、Sprint2④「North Star Dailyの根拠表示を強化」):
     # North Star Dailyの「根拠」項目はAIがテキストで要約するが、その元になった
     # 根拠材料(出典名/URL/概要/取得日。research_engine.gather_evidence_for_post)
@@ -707,6 +1005,7 @@ def _score_and_analyze_posts(posts: list) -> None:
     except Exception as e:
         print(f"Feedback Collectorの実行中にエラーが発生しました: {e}")
 
+    return accepted_posts
 
 
 def _select_daily_content_picks(entries: list) -> list:
@@ -800,20 +1099,74 @@ def _select_daily_content_picks(entries: list) -> list:
     return picks
 
 
+def _compute_reel_stats(reel_posts: list) -> dict:
+    """カテゴリ集約分析用のリール統計値を計算する(2026-07-18追加)。"""
+    n = len(reel_posts)
+    if not n:
+        return {}
+    accts = {
+        (p.get("source_account") or p.get("username") or "").strip().lower()
+        for p in reel_posts
+        if (p.get("source_account") or p.get("username") or "").strip()
+    }
+    total_views = sum((p.get("views") or 0) for p in reel_posts)
+    like_rates, comment_rates = [], []
+    for p in reel_posts:
+        followers = p.get("followers") or 0
+        if followers:
+            like_rates.append((p.get("likes") or 0) / followers)
+            comment_rates.append((p.get("comments") or 0) / followers)
+    return {
+        "reel_count": n,
+        "account_count": len(accts),
+        "avg_views": round(total_views / n),
+        "avg_like_rate_pct": round(sum(like_rates) / len(like_rates) * 100, 2) if like_rates else "",
+        "avg_comment_rate_pct": round(sum(comment_rates) / len(comment_rates) * 100, 3) if comment_rates else "",
+    }
+
+
+# 2026-07-18: リール最低分析条件
+TREND_MIN_REELS    = 20   # リール本数
+TREND_MIN_ACCOUNTS = MIN_ACCOUNTS_FOR_TREND  # アカウント数(=10)
+
+
 def _analyze_and_save_trend(category_label: str, posts: list) -> None:
     if not posts:
         print(f"{category_label}: プール対象の投稿が無いため分析をスキップしました")
         return
 
-    print(f"{category_label}のリールをAIで集約分析中...")
+    # 2026-07-18: リールのみ集計対象(カルーセル・通常投稿は除外)
+    reel_posts = [p for p in posts if p.get("is_reel", False)]
+
+    # 2026-07-18: 最低分析条件チェック
+    reel_stats = _compute_reel_stats(reel_posts)
+    n_reels = reel_stats.get("reel_count", 0)
+    n_accts = reel_stats.get("account_count", 0)
+    if n_reels < TREND_MIN_REELS or n_accts < TREND_MIN_ACCOUNTS:
+        print(
+            f"{category_label}: ⚠ リール分析データ不足 "
+            f"（リール{n_reels}本 / アカウント{n_accts} — "
+            f"最低{TREND_MIN_REELS}本・{TREND_MIN_ACCOUNTS}アカウント必要）"
+            f"— カテゴリ集約分析をスキップしました"
+        )
+        return
+
+    print(
+        f"{category_label}のリールをAIで集約分析中… "
+        f"（リール{n_reels}本 / {n_accts}アカウント / "
+        f"平均再生数{reel_stats.get('avg_views',0):,} / "
+        f"平均いいね率{reel_stats.get('avg_like_rate_pct','')}% / "
+        f"平均コメント率{reel_stats.get('avg_comment_rate_pct','')}%）"
+    )
     try:
-        analysis = analyze_category_trend(category_label, posts)
+        # 2026-07-18: reel_postsのみをAI分析に渡す（カルーセル・通常投稿は除外済み）
+        analysis = analyze_category_trend(category_label, reel_posts)
     except Exception as e:
         print(f"{category_label}の分析中にエラーが発生しました: {e}")
         return
 
     try:
-        save_category_trend_summary(category_label, posts, analysis)
+        save_category_trend_summary(category_label, reel_posts, analysis, reel_stats=reel_stats)
         print(f"{category_label}の分析結果をスプレッドシートに保存しました")
     except Exception as e:
         print(f"{category_label}の分析結果の保存中にエラーが発生しました: {e}")
@@ -1048,7 +1401,7 @@ def main() -> None:
     # 1. Instagram全体トレンドの投稿を取得(①全体トレンド+②美容ジャンルトレンドを
     #    1回の取得でまとめて行う。2026-07-02(item5): Bright Dataへの取得を増やさず、
     #    美容ジャンルアカウント由来の投稿だけを事後的にCATEGORY_BEAUTYへ再分類する)
-    raw_posts = _fetch_raw_posts(CATEGORY_ALL, lambda: fetch_trend_posts(accounts))
+    raw_posts, snapshot_meta = _fetch_raw_posts(CATEGORY_ALL, lambda: fetch_trend_posts(accounts))
     apply_beauty_category(raw_posts, ANTENNA_ACCOUNTS_BEAUTY)
 
     # 2. 構造的に使える投稿だけをプールとして抜き出す
@@ -1056,10 +1409,15 @@ def main() -> None:
     #    詳細はbright_data_fetcher.build_post_poolのdocstring参照)
     result = build_post_pool(raw_posts)
     posts = result["pool"]
+    _pool_stats = result["stats"]
+
     print(
-        f"{CATEGORY_ALL}: 取得{result['stats']['fetched']}件中"
-        f"{result['stats']['pool_count']}件をResearch Candidate Scoreの対象プールにしました"
+        f"{CATEGORY_ALL}: 取得{_pool_stats['fetched']}件中"
+        f"{_pool_stats['pool_count']}件をResearch Candidate Scoreの対象プールにしました"
     )
+
+    # ── 除外理由集計ログ ─────────────────────────────────────────────────────
+    _print_pool_exclusion_summary(_pool_stats, raw_posts, posts)
 
     # 2.5 フィルター前の取得投稿"全件"(除外理由付き)をraw_fetch_logシートに
     #     常時保存する(2026-06-30追加。build_post_poolがpost["pool_exclusion_
@@ -1075,8 +1433,42 @@ def main() -> None:
     _grow_antenna_accounts(raw_posts, accounts)
 
     if not posts:
-        print("Research Candidate Scoreの対象になる投稿が1件もありませんでした(取得失敗・リール以外・投稿日が古いのいずれか)")
+        fetched_count = result["stats"].get("fetched", 0)
+        pool_count = result["stats"].get("pool_count", 0)
+
+        # 2026-07-18: 0件時は明確なメッセージを出してトレンド分析をスキップ
         print()
+        print("=" * 60)
+        if fetched_count == 0:
+            print("【データ不足】Instagramデータを取得できていないため、トレンド分析は実行できません")
+            print("  原因: Bright Dataの取得件数が0件です（タイムアウト・API障害の可能性）")
+            print("  次回実行時にpending_snapshots.jsonの再確認を行います")
+            no_data_reason = "Bright Data取得0件（タイムアウト・API障害の可能性）"
+        else:
+            print("【データ不足】フィルタ後にプール対象の投稿が0件のため、トレンド分析は実行できません")
+            print(f"  取得: {fetched_count}件 → フィルタ後: 0件（リール以外・投稿日が古いなど）")
+            no_data_reason = f"取得{fetched_count}件だがフィルタ後0件（リール以外・投稿日が古いなど）"
+        print("=" * 60)
+        print()
+
+        # スプレッドシートに0件ステータスを保存
+        try:
+            save_trend_analysis_no_data(reason=no_data_reason)
+        except Exception as e:
+            print(f"trend_analysis 0件ステータス保存中にエラーが発生しました: {e}")
+
+        # snapshot_metaからrun_log用の情報を抽出
+        _run_log_from_snapshot_meta(
+            snapshot_meta=snapshot_meta,
+            accounts=accounts,
+            fetched_count=fetched_count,
+            pool_count=0,
+            post_generated=False,
+            registered_count=len(list(ANTENNA_ACCOUNTS)),
+        )
+        # 回収完了バッチがあればその行も追記
+        _run_log_recovered(snapshot_meta)
+
         print("===== 取得・プールログ =====")
         _print_stats(CATEGORY_ALL, result["stats"])
         # 2026-07-01: 投稿0件でもCreator Studioは実行する(昨日以前のデータを使う)
@@ -1106,8 +1498,9 @@ def main() -> None:
     # 6. プール対象の投稿全件(①全体トレンド+②美容ジャンルトレンドが混在した
     #    1つのプール)のResearch Candidate Scoreを計算・記録し、スコア上位件だけ
     #    個別AI分析する
+    analysis_posts = []
     if _budget_ok("ステップ6: Research Candidate Score + AI個別分析"):
-        _score_and_analyze_posts(posts)
+        analysis_posts = _score_and_analyze_posts(posts) or []
     else:
         print("ステップ6をスキップ: OpenAI個別分析なしでCreator Studioへ進みます")
 
@@ -1115,8 +1508,9 @@ def main() -> None:
     #    Score・個別AI分析では統合プールとして扱うが、この集約分析
     #    (analyze_category_trend)だけはカテゴリごとに分けて実行する)
     if _budget_ok("ステップ7: カテゴリ集約分析"):
-        posts_all = [p for p in posts if p.get("category") == CATEGORY_ALL]
-        posts_beauty = [p for p in posts if p.get("category") == CATEGORY_BEAUTY]
+        _ap = analysis_posts if analysis_posts else posts
+        posts_all = [p for p in _ap if p.get("category") == CATEGORY_ALL]
+        posts_beauty = [p for p in _ap if p.get("category") == CATEGORY_BEAUTY]
         _analyze_and_save_trend(CATEGORY_ALL, posts_all)
         _analyze_and_save_trend(CATEGORY_BEAUTY, posts_beauty)
     else:
@@ -1135,6 +1529,17 @@ def main() -> None:
     except Exception as e:
         print(f"Phase 1の実行中にエラーが発生しました: {e}")
 
+    # 2026-07-18: 実行完了をrun_logシートに記録
+    _run_log_from_snapshot_meta(
+        snapshot_meta=snapshot_meta,
+        accounts=accounts,
+        fetched_count=result["stats"].get("fetched", 0),
+        pool_count=result["stats"].get("pool_count", 0),
+        post_generated=False,
+        registered_count=len(list(ANTENNA_ACCOUNTS)),
+    )
+    _run_log_recovered(snapshot_meta)
+
     print()
     print("すべての処理が完了しました")
 
@@ -1148,10 +1553,12 @@ if __name__ == "__main__":
                          help="APIを呼ばずプロンプトと保存先のみ表示")
     _args, _unknown = _parser.parse_known_args()
 
-    # dry-run フラグを creator_studio モジュールへ伝達
+    # dry-run フラグを creator_studio と bright_data_fetcher へ伝達
     if _args.dry_run:
         import creator_studio as _cs
         _cs._DRY_RUN = True
+        import bright_data_fetcher as _bdf
+        _bdf.DRY_RUN = True
 
     if _args.thumbnail:
         # ── サムネイル分析モード ──────────────────────────────────────────
