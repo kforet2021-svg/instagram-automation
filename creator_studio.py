@@ -1081,126 +1081,168 @@ def _check_other_salon_could_say(record: dict) -> dict:
 # ⑪ CEO Challenge — 「森このみ本人が投稿したいか？」＋「他サロンでも言えるか？」
 # ────────────────────────────────────────────────────────────────────────────
 
-def _generate_ceo_challenge(record: dict, review: dict) -> dict:
+def _generate_ceo_challenge(
+    record: dict,
+    review: dict,
+    quality_gates: dict | None = None,
+) -> dict:
+    """
+    編集長レビュー。全チェック（quality_gates・claims_check含む）完了後に呼ぶこと。
+
+    verdict は以下3種のみ:
+      APPROVED          — 投稿OK
+      REVISION_REQUIRED — 要修正（構成・表現レベルの問題）
+      REJECTED          — 投稿不可（NGワード・Claims違反・FALLBACKモード違反）
+
+    投稿ステータス（quality_gates.all_pass）との整合性を保証する:
+      - quality_gates.all_pass=False  → APPROVED は返さない
+      - claims_check.all_pass=False   → APPROVED は返さない
+    """
     avg         = review["average"]
     brand_score = int(record.get("brand_score", "80") or 80)
     hook        = record.get("hook", "")
     script      = record.get("script_full", "")
     combined    = f"{hook} {script}"
+    data_mode   = record.get("_data_mode", "LIVE_INSTAGRAM")
 
-    # ── Gate 1: 「他サロンでも言えるか？」 ──────────────────────────
-    salon_check = _check_other_salon_could_say(record)
+    # ── 各チェック結果を収集 ─────────────────────────────────────────
+    salon_check   = _check_other_salon_could_say(record)
+    ng_hits       = [w for w in _BRAND.ng_words if w in combined]
+    ng_concepts   = [m for m in ["絶対に変わる", "必ず", "〇〇日で", "危険", "失敗しない", "完璧"]
+                     if m in combined]
+    score_fail    = avg < 78 or brand_score < 78
 
-    # ── Gate 2: NGワード ────────────────────────────────────────────
-    ng_hits = [w for w in _BRAND.ng_words if w in combined]
-
-    # ── Gate 3: NG概念 ──────────────────────────────────────────────
-    ng_concept_markers = ["絶対に変わる", "必ず", "〇〇日で", "危険", "失敗しない", "完璧"]
-    concept_hits = [m for m in ng_concept_markers if m in combined]
-
-    # ── Gate 4: Creator Review 点数 ─────────────────────────────────
-    score_fail = avg < 78 or brand_score < 78
-
-    # ── Gate 5: Claims Check ────────────────────────────────────────
     claims_result = record.get("_claims_check", {})
-    data_mode     = record.get("_data_mode", "LIVE_INSTAGRAM")
-    claims_fail   = not claims_result.get("all_pass", True)
+    claims_pass   = claims_result.get("all_pass", True)
     claims_issues = claims_result.get("blocking_issues", [])
 
-    # ── Gate 6: FALLBACKモード専用 ──────────────────────────────────
     fallback_issues: list[str] = []
     if data_mode == "FALLBACK_NO_INSTAGRAM":
-        ig_violations = claims_result.get("instagram_violations", [])
-        for _, lbl in ig_violations:
-            fallback_issues.append(f"FALLBACK時Instagram根拠表現: {lbl}")
-        # trend_level A/B 使用チェック（選択済みcandidateに残っている場合）
-        trend_level = record.get("trend_level", "")
-        if trend_level in ("A", "B"):
-            fallback_issues.append(
-                f"FALLBACK時に根拠レベル{trend_level}は使用不可（最高C）"
-            )
+        for _, lbl in claims_result.get("instagram_violations", []):
+            fallback_issues.append(f"Instagram根拠表現（FALLBACK時禁止）: {lbl}")
+        if record.get("trend_level", "") in ("A", "B"):
+            fallback_issues.append("根拠レベルA/BはFALLBACK時禁止（最高C）")
 
-    # ── Gate 7: Reality なし体験談 ──────────────────────────────────
     reality_issues = [lbl for _, lbl in claims_result.get("reality_violations", [])]
 
-    # ── 総合判定 ─────────────────────────────────────────────────────
-    is_no = (
-        (not salon_check["is_unique"])
-        or bool(ng_hits)
-        or bool(concept_hits)
-        or score_fail
-        or claims_fail
-        or bool(fallback_issues)
-        or bool(reality_issues)
-    )
+    gates_pass = (quality_gates or {}).get("all_pass", True)
+    failed_gates = [label for label, ok in (quality_gates or {}).get("gates", {}).items() if not ok]
+    gate_advice  = (quality_gates or {}).get("advice", {})
 
-    if is_no:
-        reasons_no = []
-        if not salon_check["is_unique"]:
-            reasons_no.append("他サロンでも言える内容になっている（固有視点ゼロ）")
-        if ng_hits:
-            reasons_no.append(f"NGワード検出: {', '.join(ng_hits)}")
-        if concept_hits:
-            reasons_no.append(f"NG表現検出: {', '.join(concept_hits)}")
-        if avg < 78:
-            reasons_no.append(f"Creator Review平均点が{avg}点（目標78点以上）")
-        if brand_score < 78:
-            reasons_no.append(f"Brand Score {brand_score}点（目標78点以上）")
-        for issue in claims_issues:
-            reasons_no.append(issue)
-        for issue in fallback_issues:
-            reasons_no.append(issue)
-        for issue in reality_issues:
-            reasons_no.append(f"Reality未入力なのに体験談表現: {issue}")
+    # ── verdict 決定ロジック ─────────────────────────────────────────
+    # REJECTED: 削除が必要な違反（NGワード・Claims・FALLBACK違反・Reality違反）
+    rejected = bool(ng_hits) or bool(ng_concepts) or not claims_pass or bool(fallback_issues)
+    # REVISION_REQUIRED: 構成・表現の改善が必要
+    revision = not gates_pass or score_fail or not salon_check["is_unique"] or bool(reality_issues)
 
-        improve_hints = []
-        if not salon_check["is_unique"]:
-            improve_hints.append("【固有視点を追加する】\n" + salon_check["missing_hint"])
-        if ng_hits:
-            improve_hints.append(
-                "【NGワードを言い換える】\n"
-                + "\n".join(f"  「{w}」→ より柔らかい表現に" for w in ng_hits)
+    if rejected:
+        verdict = "REJECTED"
+    elif revision:
+        verdict = "REVISION_REQUIRED"
+    else:
+        verdict = "APPROVED"
+
+    # ── REVIEW_REASON: 原因を1件ずつ列挙 ────────────────────────────
+    review_reasons: list[str] = []
+
+    # Claims Check
+    for issue in claims_issues:
+        review_reasons.append(f"[Claims Check] {issue}")
+    for issue in fallback_issues:
+        review_reasons.append(f"[FALLBACKモード違反] {issue}")
+    for issue in reality_issues:
+        review_reasons.append(f"[Reality不足] Reality未入力なのに体験談表現: {issue}")
+
+    # NGワード
+    for w in ng_hits:
+        review_reasons.append(f"[NGワード] 「{w}」を削除・言い換えてください")
+    for m in ng_concepts:
+        review_reasons.append(f"[NG概念] 「{m}」は使用不可")
+
+    # Evidence 不足
+    hyp_count = claims_result.get("hypothesis_count", 0)
+    if hyp_count > 0:
+        review_reasons.append(f"[Evidence不足] HYPOTHESIS {hyp_count}件 — Evidence Registryへの登録か観察表現への言い換えが必要")
+
+    # Expert Angle・固有視点
+    if not salon_check["is_unique"]:
+        review_reasons.append(f"[Expert Angle不足] 他サロンでも言える内容（固有視点ゼロ）")
+
+    # Quality Gates
+    for gate_label in failed_gates:
+        review_reasons.append(f"[品質ゲート] {gate_label}: 未通過")
+
+    # スコア
+    if avg < 78:
+        review_reasons.append(f"[スコア] Creator Review {avg}点（目標78点以上）")
+    if brand_score < 78:
+        review_reasons.append(f"[スコア] Brand Score {brand_score}点（目標78点以上）")
+
+    # ── 修正アクション（1件ずつ具体的に）───────────────────────────
+    action_items: list[str] = []
+
+    # Claims → 言い換え案を1件ずつ
+    for c in claims_result.get("claims", []):
+        if c.get("classification") == "HYPOTHESIS" and c.get("suggested_rewrite"):
+            action_items.append(
+                f"因果表現を弱める: 「{c['claim_label']}」\n"
+                f"     → {c['suggested_rewrite']}"
             )
-        if score_fail:
-            w_item, w_score = min(review["scores"].items(), key=lambda x: x[1])
-            improve_hints.append(f"【最低スコア項目を改善】\n  「{w_item}」（{w_score}点）を優先してください")
-        if claims_issues:
-            rewrites = [i for i in claims_issues if "言い換え案" in i]
-            if rewrites:
-                improve_hints.append("【Claims Check — 言い換え案】\n" + "\n".join(f"  {r}" for r in rewrites))
-            else:
-                improve_hints.append("【Claims Check — 要修正】\n  " + "\n  ".join(claims_issues))
-        if fallback_issues:
-            improve_hints.append(
-                "【FALLBACKモード違反 — 削除必須】\n"
-                + "\n".join(f"  {i}" for i in fallback_issues)
-            )
 
-        return {
-            "verdict":      "NO — 投稿しないでください",
-            "reason":       "・".join(reasons_no),
-            "improve":      "\n\n".join(improve_hints),
-            "salon_check":  salon_check,
-        }
+    # Reality
+    if reality_issues:
+        action_items.append("Realityが空のため、具体的な施術事例・お客様の声を1件追加する")
 
-    # ── YES ──────────────────────────────────────────────────────────
-    strength = []
-    if salon_check["found_unique"]:
-        strength.append(f"固有視点あり: {salon_check['found_unique'][0]}")
-    if review["scores"].get("Audience Stop", 0) >= 85:
-        strength.append("最初の3秒で視聴者が止まれる")
-    if review["scores"].get("Expert Thinking", 0) >= 85:
-        strength.append("専門家の思考プロセスが見えている")
-    if review["scores"].get("Curiosity", 0) >= 85:
-        strength.append("続きを見たくなる構成になっている")
-    if not strength:
-        strength.append("ブランドラインを守りながら価値ある情報を届けられている")
+    # NGワード
+    for w in ng_hits:
+        action_items.append(f"NGワード「{w}」を柔らかい表現に言い換える")
+
+    # 固有視点
+    if not salon_check["is_unique"]:
+        action_items.append(
+            "CORE HARI固有の視点を1つ追加する\n"
+            "     例: 咬筋優位・舌の位置・表情グセ・「骨格の大きさは変わりません、正直に言います」"
+        )
+
+    # ゲートごとの具体的アドバイス
+    for gate_key, hint in gate_advice.items():
+        # ゲートのアドバイスから最初の1文だけ抜く（詳細は⑫で表示）
+        first_line = hint.strip().splitlines()[0] if hint.strip() else ""
+        if first_line:
+            action_items.append(f"Gate{gate_key}: {first_line}")
+
+    # スコア最低項目
+    if score_fail:
+        worst_item, worst_score = min(review["scores"].items(), key=lambda x: x[1])
+        action_items.append(f"スコア最低項目「{worst_item}」（{worst_score}点）を改善する")
+
+    # FALLBACK違反
+    for issue in fallback_issues:
+        action_items.append(f"FALLBACK違反を削除: {issue}")
+
+    # ── APPROVED の場合の強みを列挙 ──────────────────────────────────
+    strengths: list[str] = []
+    if verdict == "APPROVED":
+        if salon_check["found_unique"]:
+            strengths.append(f"固有視点あり: {salon_check['found_unique'][0]}")
+        if review["scores"].get("Audience Stop", 0) >= 85:
+            strengths.append("最初の3秒で視聴者が止まれる")
+        if review["scores"].get("Expert Thinking", 0) >= 85:
+            strengths.append("専門家の思考プロセスが見えている")
+        if review["scores"].get("Curiosity", 0) >= 85:
+            strengths.append("続きを見たくなる構成になっている")
+        if not strengths:
+            strengths.append("ブランドラインを守りながら価値ある情報を届けられている")
 
     return {
-        "verdict":     "YES — 投稿してください",
-        "reason":      "・".join(strength),
-        "improve":     "",
-        "salon_check": salon_check,
+        "verdict":        verdict,         # APPROVED / REVISION_REQUIRED / REJECTED
+        "review_reasons": review_reasons,  # 原因リスト
+        "action_items":   action_items,    # 修正アクション（1件ずつ）
+        "strengths":      strengths,       # APPROVED時の強み
+        "salon_check":    salon_check,
+        # 後方互換（旧 reason / improve / verdict 文字列は verdict から類推可能だが残す）
+        "reason":  " / ".join(review_reasons[:3]) if review_reasons else " / ".join(strengths),
+        "improve": "\n".join(f"・{a}" for a in action_items),
     }
 
 
@@ -2105,12 +2147,16 @@ def _assemble(today: str, source_type: str, source_url: str,
                                    "insight_count": 0, "instagram_violations": [],
                                    "reality_violations": [], "_error": str(_cc_err)}
 
-    record["_ceo_challenge"]    = _generate_ceo_challenge(record, review)
     flow = _build_follower_flow(record)
     record["_follower_flow"]    = flow                                  # ①〜⑤ フロー分析
     record["_quality_gates"]    = _check_quality_gates(record, flow)   # 5ゲート品質チェック
     record["_four_scores"]      = _compute_four_scores(record, flow)   # 4スコア自己採点
     record["_audience_thinking"] = _check_audience_thinking(record)    # ⑬ 視聴者の頭の中
+
+    # CEO Challenge は全チェック完了後に実行（quality_gates を入力として使う）
+    record["_ceo_challenge"]    = _generate_ceo_challenge(
+        record, review, quality_gates=record["_quality_gates"]
+    )
 
     return record
 
@@ -3775,19 +3821,32 @@ def print_creator_studio_summary(record: dict) -> None:
 
         # ── 総合判定 ────────────────────────────────────────────────
         verdict = ceo.get("verdict", "")
-        icon    = "✅" if verdict.startswith("YES") else "❌"
-        print(f"\n  {icon} {verdict}")
+        _VERDICT_DISPLAY = {
+            "APPROVED":          ("✅", "APPROVED — 投稿OK"),
+            "REVISION_REQUIRED": ("⚠️ ", "REVISION_REQUIRED — 要修正"),
+            "REJECTED":          ("❌", "REJECTED — 投稿不可"),
+        }
+        v_icon, v_label = _VERDICT_DISPLAY.get(verdict, ("❓", verdict))
+        print(f"\n  {v_icon} {v_label}")
 
-        reason = ceo.get("reason", "")
-        if reason:
-            print(f"\n  【根拠】")
-            body(reason, indent=4)
+        review_reasons = ceo.get("review_reasons", [])
+        if review_reasons:
+            print(f"\n  【REVIEW_REASON】")
+            for reason_item in review_reasons:
+                print(f"    ・{reason_item}")
 
-        improve = ceo.get("improve", "")
-        if improve:
-            print(f"\n  ⚠️  改善してから投稿してください")
+        strengths = ceo.get("strengths", [])
+        if strengths:
+            print(f"\n  【強み】")
+            for s in strengths:
+                print(f"    ✅ {s}")
+
+        action_items = ceo.get("action_items", [])
+        if action_items:
+            print(f"\n  【修正アクション（1件ずつ）】")
             print(f"  {'─'*50}")
-            body(improve, indent=4)
+            for i, action in enumerate(action_items, 1):
+                print(f"  {i}. {action}")
             print(f"  {'─'*50}")
 
     # ── ⑫ Follower Intelligence ─────────────────────────────────
@@ -3859,13 +3918,14 @@ def print_creator_studio_summary(record: dict) -> None:
                 print(f"    → {log_line}")
 
         print(f"\n  {'─'*52}")
-        if all_pass and scores_pass:
-            print(f"  ✅ ALL PASS — 投稿してください。")
-        elif qa_log and any("パッチ枯渇" in l or "iter3" in l for l in qa_log):
-            print(f"  ⚠️  3回改善しましたが改善できませんでした。")
-            print(f"  最善状態の投稿を出力します。そのまま投稿しても構いません。")
+        # 投稿ステータスは編集長レビュー verdict と完全一致させる
+        _final_verdict = ceo.get("verdict", "REVISION_REQUIRED") if ceo else "REVISION_REQUIRED"
+        if _final_verdict == "APPROVED":
+            print(f"  ✅ 投稿OK（APPROVED）")
+        elif _final_verdict == "REVISION_REQUIRED":
+            print(f"  ⚠️  要修正（REVISION_REQUIRED）— 修正アクションを確認してください")
         else:
-            print(f"  ✅ QA完了 — 投稿してください。")
+            print(f"  ❌ 投稿不可（REJECTED）— 削除・差し替えが必要な違反があります")
         print(f"  {'─'*52}")
 
     # ── ⑬ Audience Thinking ──────────────────────────────────────
