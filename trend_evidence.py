@@ -42,15 +42,22 @@ _RECENCY_DAYS = 45
 def gather_evidence(
     candidates: list[dict],
     world_ctx: dict,
+    instagram_fetched_today: int = -1,
 ) -> list[dict]:
     """
     候補リスト全件に証拠フィールドを付与して返す。
     Sheet取得失敗時も候補自体は返す（証拠ゼロ＝Eレベル）。
+
+    instagram_fetched_today: 今回実行で取得したInstagram投稿件数。
+      -1 = 不明（通常実行）
+       0 = 取得0件（reelsシートの過去データをInstagram根拠に使わない、最高レベルC）
     """
     checked_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    ig_zero_today = (instagram_fetched_today == 0)
 
     # 一度だけシートを読み込む
-    reels_rows = _load_reels_sheet()
+    # Instagram取得0件のときは reels シートを読まない（過去キャッシュを根拠に使わない）
+    reels_rows = [] if ig_zero_today else _load_reels_sheet()
     hook_lib_rows = _load_hook_library()
 
     enriched = []
@@ -59,14 +66,15 @@ def gather_evidence(
 
         keyword = _extract_keyword(c)
 
-        # Instagram 証拠
+        # Instagram 証拠（今回0件の場合は強制的に空リスト）
         ig_hits = _search_reels_sheet(reels_rows, keyword)
         # 過去実績
         own_hits = _search_hook_library(hook_lib_rows, keyword)
         # 季節性
         seasonal = _get_seasonal_evidence(world_ctx, keyword)
 
-        level, level_reason = _assign_level(ig_hits, own_hits, seasonal)
+        level, level_reason = _assign_level(ig_hits, own_hits, seasonal,
+                                            ig_zero_today=ig_zero_today)
 
         # 参考URL（最大3件）
         ref_urls = [h["url"] for h in ig_hits[:3]]
@@ -258,18 +266,24 @@ def _assign_level(
     ig_hits: list[dict],
     own_hits: list[dict],
     seasonal: str,
+    ig_zero_today: bool = False,
 ) -> tuple[str, str]:
     """
     根拠レベル A〜E を決定する。
 
+    ig_zero_today=True の場合:
+      - Instagram根拠は使用不可（今回取得0件のため）
+      - 最高レベルは C（レベルA・Bは禁止）
+
     Returns: (level, reason_text)
     """
-    has_instagram = len(ig_hits) > 0
+    has_instagram = len(ig_hits) > 0 and not ig_zero_today
     has_own       = len(own_hits) > 0
     has_seasonal  = bool(seasonal)
 
     # A: Instagram あり + 季節性あり（2媒体）
-    if has_instagram and has_seasonal:
+    # ig_zero_today のとき A は禁止
+    if has_instagram and has_seasonal and not ig_zero_today:
         count = len(ig_hits)
         reason = (
             f"Instagramの直近投稿{count}件でキーワードを確認。"
@@ -278,7 +292,8 @@ def _assign_level(
         return "A", reason
 
     # B: Instagramだけで複数件、または高いいいね数
-    if has_instagram:
+    # ig_zero_today のとき B は禁止
+    if has_instagram and not ig_zero_today:
         top = ig_hits[0]
         count = len(ig_hits)
         reason = (
@@ -289,7 +304,8 @@ def _assign_level(
 
     # C: 季節性のみ
     if has_seasonal:
-        reason = f"Instagram実績は確認できないが、季節・気候コンテキストから今扱う理由がある。（{seasonal[:50]}）"
+        prefix = "（Instagram取得0件のため根拠除外）" if ig_zero_today else ""
+        reason = f"{prefix}季節・気候コンテキストから今扱う理由がある。（{seasonal[:50]}）"
         return "C", reason
 
     # D: 自分の過去実績のみ

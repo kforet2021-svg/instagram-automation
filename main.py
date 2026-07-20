@@ -1427,7 +1427,7 @@ def main() -> None:
         # Instagram根拠なしで Creator Studio だけ実行
         try:
             if _budget_ok("Creator Studio（障害モード）"):
-                cs_result = generate_creator_studio_daily()
+                cs_result = generate_creator_studio_daily(instagram_fetched=0)
                 if cs_result:
                     print_creator_studio_summary(cs_result)
         except Exception as e:
@@ -1516,7 +1516,7 @@ def main() -> None:
         # 2026-07-01: 投稿0件でもCreator Studioは実行する(昨日以前のデータを使う)
         phase1_result = {}
         try:
-            phase1_result = generate_phase1_daily() or {}
+            phase1_result = generate_phase1_daily(instagram_fetched=fetched_count) or {}
             if phase1_result:
                 print_phase1_summary(phase1_result)
         except Exception as e:
@@ -1564,8 +1564,9 @@ def main() -> None:
     _print_stats(CATEGORY_ALL, result["stats"])
 
     # Phase 1: Topic Candidates まで生成してSTOP（投稿生成はPhase 2以降）
+    _ig_fetched_today = _pool_stats.get("fetched", 0)
     try:
-        phase1_result = generate_phase1_daily() or {}
+        phase1_result = generate_phase1_daily(instagram_fetched=_ig_fetched_today) or {}
         if phase1_result:
             print_phase1_summary(phase1_result)
     except Exception as e:

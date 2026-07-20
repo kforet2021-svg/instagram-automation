@@ -2656,7 +2656,7 @@ def _themes_match(em_theme: str, record_theme: str) -> bool:
 # Phase 1: Topic Candidates まで生成してSTOP
 # ────────────────────────────────────────────────────────────────────────────
 
-def generate_phase1_daily() -> dict:
+def generate_phase1_daily(instagram_fetched: int = -1) -> dict:
     """
     Creator Intelligence Phase 1 — 毎朝のHook提案。
 
@@ -2716,7 +2716,8 @@ def generate_phase1_daily() -> dict:
     try:
         from trend_evidence import gather_evidence
         print("  ③ 根拠チェック中（Instagram実績・季節性）...")
-        candidates = gather_evidence(candidates, world_ctx)
+        candidates = gather_evidence(candidates, world_ctx,
+                                     instagram_fetched_today=instagram_fetched)
     except Exception as _ev_err:
         print(f"  ⚠️  根拠チェック失敗（スキップ）: {_ev_err}")
 
@@ -2756,6 +2757,7 @@ def generate_phase1_daily() -> dict:
         post_type=post_type,
         reality=reality,
         world_ctx=world_ctx,
+        today_ig_fetched=instagram_fetched,
     )
 
     return {
@@ -2933,9 +2935,17 @@ def _topic_relevance_score(caption: str, perspective: str, angle: str) -> int:
     return score
 
 
-def _get_reference_instagrams(perspective: str = "", angle: str = "", top_n: int = 5) -> list[dict]:
+def _get_reference_instagrams(
+    perspective: str = "",
+    angle: str = "",
+    top_n: int = 5,
+    today_fetched: int = -1,
+) -> list[dict]:
     """
     reels シートから Topic一致度スコアの高い投稿を top_n 件返す。
+
+    today_fetched=0 のとき: reelsシートの過去データを返すが、
+      各エントリに cached=True を付与（表示側で「過去取得データ」と明示する）。
 
     優先順位: perspective同義語 > 表情筋 > 小顔 > 顔むくみ > 左右差 > 美容整体 > 美容
     一致度が同じ場合はいいね数で決定。
@@ -3007,6 +3017,7 @@ def _get_reference_instagrams(perspective: str = "", angle: str = "", top_n: int
                 "saves":     _int(row, saves_i),
                 "hook":      hook_line,
                 "rel_score": rel,
+                "cached":    (today_fetched == 0),
             })
             if len(result) >= top_n:
                 break
@@ -3023,6 +3034,7 @@ def _print_chatgpt_handoff(
     post_type: Optional[str],
     reality: Optional[dict],
     world_ctx: dict,
+    today_ig_fetched: int = -1,
 ) -> None:
     """ChatGPTへ渡すためのテンプレートをMarkdownで出力する。投稿本文は生成しない。"""
     hook        = selected.get("hook") or selected.get("theme", "")
@@ -3054,7 +3066,10 @@ def _print_chatgpt_handoff(
     expert_angles = ea.select_expert_angles(perspective=perspective)
 
     # 参考Instagram — reels シートからTopic関連投稿を自動抽出
-    refs = _get_reference_instagrams(perspective=perspective, angle=angle, top_n=5)
+    refs = _get_reference_instagrams(
+        perspective=perspective, angle=angle, top_n=5,
+        today_fetched=today_ig_fetched,
+    )
 
     SEP = "=" * 60
     print()
@@ -3089,10 +3104,17 @@ def _print_chatgpt_handoff(
     else:
         print("（未選択）")
     print()
-    print("【参考Instagram】")
+    _ig_zero = (today_ig_fetched == 0)
+    _ig_header = "【参考Instagram（過去取得データ）】" if _ig_zero else "【参考Instagram】"
+    print(_ig_header)
+    if _ig_zero:
+        print("  ※ 今回のInstagram取得件数が0件のため、過去蓄積データを表示しています。")
+        print("  ※ Root Evidenceにはこのデータを含みません（Season / World Context / Thought Library のみ）。")
+        print()
     if refs:
         for i, ref in enumerate(refs, 1):
-            print(f"  ─ 参考{i}")
+            cached_label = "【過去取得データ】 " if ref.get("cached") else ""
+            print(f"  ─ 参考{i} {cached_label}")
             print(f"  ・URL:    {ref['url']}")
             if ref.get("hook"):
                 print(f"  ・Hook:   {ref['hook']}")
@@ -3209,7 +3231,7 @@ def print_phase1_summary(result: dict) -> None:
 # メイン公開関数（旧Phase: 投稿生成フロー — Phase2以降で再有効化）
 # ────────────────────────────────────────────────────────────────────────────
 
-def generate_creator_studio_daily() -> Optional[dict]:
+def generate_creator_studio_daily(instagram_fetched: int = -1) -> Optional[dict]:
     """
     Creator Intelligence 6ステップ生成フロー。
 
@@ -3337,6 +3359,7 @@ def generate_creator_studio_daily() -> Optional[dict]:
 
     # メタ情報を record に格納
     record["_editorial_meeting"] = meeting
+    record["_instagram_fetched"] = instagram_fetched  # 表示制御用（シート非保存）
 
     try:
         sheets_writer.save_creator_studio_daily(record)
