@@ -1547,10 +1547,12 @@ def main() -> None:
 if __name__ == "__main__":
     import argparse as _argparse
     _parser = _argparse.ArgumentParser(add_help=False)
-    _parser.add_argument("--thumbnail", action="store_true", help="サムネイル分析モードで実行")
-    _parser.add_argument("--test",      action="store_true", help="テストモード（3件のみ）")
-    _parser.add_argument("--dry-run",   action="store_true", dest="dry_run",
+    _parser.add_argument("--thumbnail",   action="store_true", help="サムネイル分析モードで実行")
+    _parser.add_argument("--test",        action="store_true", help="テストモード（3件のみ）")
+    _parser.add_argument("--dry-run",     action="store_true", dest="dry_run",
                          help="APIを呼ばずプロンプトと保存先のみ表示")
+    _parser.add_argument("--batch-size",  type=int, default=None, dest="batch_size",
+                         help="1ジョブあたりのアカウント数を上書き (例: --batch-size 2)")
     _args, _unknown = _parser.parse_known_args()
 
     # dry-run フラグを creator_studio と bright_data_fetcher へ伝達
@@ -1559,6 +1561,15 @@ if __name__ == "__main__":
         _cs._DRY_RUN = True
         import bright_data_fetcher as _bdf
         _bdf.DRY_RUN = True
+
+    # バッチサイズ上書き
+    if _args.batch_size is not None:
+        import bright_data_fetcher as _bdf2
+        if 1 <= _args.batch_size <= 10:
+            _bdf2.ACCOUNTS_PER_BATCH = _args.batch_size
+            print(f"[設定] バッチサイズを {_args.batch_size} アカウント/ジョブ に変更しました")
+        else:
+            print(f"[警告] --batch-size は 1〜10 の範囲で指定してください（指定値: {_args.batch_size}）")
 
     if _args.thumbnail:
         # ── サムネイル分析モード ──────────────────────────────────────────

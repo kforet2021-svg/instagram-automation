@@ -176,24 +176,29 @@ REELS_DISCOVER_QUERY = {"type": "discover_new", "discover_by": "url"}
 # 発生したため、1ジョブあたりのアカウント数・投稿数を絞り、小さなジョブに
 # 分割して実行する方式に変更した。
 # 目的は大量取得ではなく「毎日安定して集客に使える投稿案を作ること」。
-ACCOUNTS_PER_BATCH = 5  # 1回のBright Dataジョブで取得するアカウント数の上限(3〜5件)
+# 【2026-07-20: バッチサイズ調査結果】
+# 5アカウント/バッチ → proxy error が発生すると Bright Data がリトライし続け300秒超過。
+# 2アカウント/バッチ に下げると1ジョブの作業量が減り、proxy error も連鎖しにくくなる。
+# main.py から --batch-size 2 オプションで上書き可能。
+ACCOUNTS_PER_BATCH = 2  # 2026-07-20: 5→2に変更。proxy error によるrunning長期化対策。
 DEFAULT_RESULTS_PER_ACCOUNT = 8  # 1アカウントあたり取得する最新投稿数(5〜10件)
 
 # --- ポーリング設定 ---
-# 2026-06-29(3回目): 実際に運用したところ、ACCOUNTS_PER_BATCH=5・
-# 1アカウント8件という小さなバッチでもPOLL_TIMEOUT_SEC=120秒では
-# 毎回タイムアウトし、採用件数が0件になる事象が発生した。
-# (Discover by URLは非同期スクレイピングのため、バッチが小さくても
-#  数分かかることがある)。バッチを縮小したのは元々「1ジョブに大量の
-# アカウント・投稿数を詰め込むと600秒でもタイムアウトする」問題への
-# 対処だったため、120秒は不要に短すぎた。バッチサイズはそのままに
-# 待ち時間だけ300秒に伸ばす。
-POLL_INTERVAL_SEC = 15  # 2026-07-18: 5→15秒に変更。600秒タイムアウト時のAPI呼び出し過剰防止。
+# 2026-07-20: POLL_INTERVAL を15→30秒に変更。
+# 理由: 全バッチを一括trigger（非同期化）後は巡回ポーリングのAPI呼び出しが
+# バッチ数×ポーリング回数に比例して増える。30秒間隔にすることで
+# progress API への呼び出し回数を半減させ、レート制限リスクを下げる。
+# 43アカウント/2件バッチ=22バッチ構成では15秒だと1ラウンドで22回のAPI呼び出し、
+# 300秒予算内で最大600回になる。30秒では最大330回に抑えられる。
+POLL_INTERVAL_SEC = 30  # 2026-07-20: 15→30秒に変更。非同期化後の多バッチ対応。
 POLL_TIMEOUT_SEC = 600  # 2026-07-18: 150→600秒に変更。Discover by URLは数分かかることが多い。
 # タイムアウト時はsnapshot_idをPENDING_SNAPSHOTS_PATHに保存し、次回実行時に再確認する。
 # 【2026-07-02(10回目): 全バッチを合計した最大取得時間。これを超えたら残りのバッチは
 #   スキップして後続のOpenAI分析・Creator Studioへ進む(10分以内完了要件対応)】
 FETCH_TOTAL_BUDGET_SEC = 300  # Bright Data全体に許可する最大秒数(5分)
+
+# Bright Data Dashboard の snapshot 詳細ページURL（ログ表示・調査用）
+BD_SNAPSHOT_DASHBOARD_URL = "https://brightdata.com/cp/datasets/snapshots/{snapshot_id}"
 
 # --- 通信リトライ設定 ---
 # Bright Data側、またはネットワーク経路で一時的に接続が切れる
@@ -549,6 +554,22 @@ def _normalize_post(item: dict, source_account: str, category: str) -> dict:
     caption = _get_first(item, ["description"], "") or ""
 
     views_raw = _get_first(item, ["views", "video_play_count"], 0)
+    # 【再生数取得できない原因調査ログ (2026-07-20)】
+    # Bright Data Discover-by-URL では views/video_play_count が None になるケースが頻発。
+    # 原因: Instagram がプロフィール未認証ユーザーに再生数を非公開にしている可能性。
+    #       または Bright Data の内部データソースが Reels の plays を取得していない。
+    # このログでフィールドの実態を確認する（1投稿目のみ）。
+    if item is not None and not hasattr(_normalize_post, "_views_logged"):
+        _normalize_post._views_logged = True
+        raw_views = item.get("views")
+        raw_vpc = item.get("video_play_count")
+        if raw_views is None and raw_vpc is None:
+            print(
+                f"  [views調査] views=None, video_play_count=None "
+                f"(投稿: {item.get('url', '')[:60]})"
+            )
+        else:
+            print(f"  [views調査] views={raw_views}, video_play_count={raw_vpc}")
     likes_raw = _get_first(item, ["likes"], 0)
     comments_raw = _get_first(item, ["num_comments"], 0)
     duration_raw = _get_first(item, ["length"], None)
@@ -1091,24 +1112,47 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
         # 前回未完了ジョブがある場合: 状態確認してrunningならそのまま流用、readyなら後でdownload
         if batch_key in pending:
             pending_sid = pending[batch_key].get("snapshot_id")
-            status = _check_snapshot_status(pending_sid)
-            print(
-                f"  バッチ{batch_index}/{len(batches)}: "
-                f"前回pending snapshot_id={pending_sid} → status={status}"
-            )
-            if status in ("ready", "running"):
-                running_jobs[batch_key] = {
-                    "snapshot_id": pending_sid,
-                    "accounts": batch_usernames,
-                    "batch_index": batch_index,
-                    "recovered": status == "ready",  # readyならdownloadへ即進める
-                }
-                continue
-            elif status == "failed":
-                del updated_pending[batch_key]
-                # fallthrough: 新規trigger
+            # 【pending 再利用の正常性確認 (2026-07-20)】
+            # Bright Data のスナップショットは作成後 24 時間程度で破棄される場合がある。
+            # triggered_at から経過時間を確認し、古すぎる pending は新規 trigger する。
+            triggered_at_str = pending[batch_key].get("triggered_at", "")
+            pending_stale = False
+            if triggered_at_str:
+                try:
+                    triggered_dt = dt.datetime.fromisoformat(triggered_at_str.replace("Z", "+00:00"))
+                    age_hours = (now - triggered_dt).total_seconds() / 3600
+                    if age_hours > 20:
+                        print(
+                            f"  バッチ{batch_index}: pending snapshot_id={pending_sid} は"
+                            f" {age_hours:.1f}時間前のものです（20時間超 → 新規triggerに切り替え）"
+                        )
+                        pending_stale = True
+                        del updated_pending[batch_key]
+                except Exception:
+                    pass
+            if pending_stale:
+                pass  # fallthrough to new trigger
             else:
-                del updated_pending[batch_key]
+                status = _check_snapshot_status(pending_sid)
+                dashboard_url = BD_SNAPSHOT_DASHBOARD_URL.format(snapshot_id=pending_sid)
+                print(
+                    f"  バッチ{batch_index}/{len(batches)}: "
+                    f"前回pending snapshot_id={pending_sid} → status={status}"
+                )
+                print(f"    Dashboard: {dashboard_url}")
+                if status in ("ready", "running"):
+                    running_jobs[batch_key] = {
+                        "snapshot_id": pending_sid,
+                        "accounts": batch_usernames,
+                        "batch_index": batch_index,
+                        "recovered": status == "ready",
+                    }
+                    continue
+                elif status == "failed":
+                    del updated_pending[batch_key]
+                    # fallthrough: 新規trigger
+                else:
+                    del updated_pending[batch_key]
 
         input_list = [
             {
@@ -1138,7 +1182,9 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             })
             continue
 
+        dashboard_url = BD_SNAPSHOT_DASHBOARD_URL.format(snapshot_id=snapshot_id)
         print(f"  バッチ{batch_index}: snapshot_id={snapshot_id} 取得 → ポーリング待機へ")
+        print(f"    Dashboard: {dashboard_url}")
         # trigger直後に即時永続化
         updated_pending[batch_key] = {
             "snapshot_id": snapshot_id,
