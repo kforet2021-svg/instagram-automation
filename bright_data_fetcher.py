@@ -838,6 +838,61 @@ def _trigger_and_collect(
     return True, items, snapshot_id, "ready"
 
 
+def _trigger_batch(input_list: list) -> tuple[str | None, str]:
+    """
+    Bright Data の trigger API を呼び出し (snapshot_id, bd_status) を返す。
+    成功: (snapshot_id, "running")
+    失敗: (None, "trigger_failed")
+    """
+    params = {"dataset_id": REELS_DATASET_ID, "format": "json", "include_errors": "true"}
+    params.update(REELS_DISCOVER_QUERY)
+    try:
+        resp = _request_with_retry(
+            "POST", f"{API_BASE}/datasets/v3/trigger",
+            params=params, json=input_list, timeout=60,
+        )
+        snapshot_id = resp.json().get("snapshot_id")
+    except requests.RequestException as e:
+        print(f"  [trigger失敗] {e}")
+        return None, "trigger_failed"
+    if not snapshot_id:
+        print("  [trigger失敗] snapshot_id が返りませんでした")
+        return None, "trigger_failed"
+    return snapshot_id, "running"
+
+
+def _download_snapshot(snapshot_id: str) -> tuple[bool, list, str]:
+    """
+    ready 状態の snapshot_id からデータをダウンロードする。
+    戻り値: (ok, items, bd_status)
+    """
+    try:
+        resp = _request_with_retry(
+            "GET",
+            f"{API_BASE}/datasets/v3/snapshot/{snapshot_id}",
+            params={"format": "json"},
+            timeout=60,
+        )
+        payload = resp.json()
+    except requests.RequestException as e:
+        print(f"  [download失敗] snapshot_id={snapshot_id}: {e}")
+        return False, [], "error"
+
+    _save_debug_snapshot(payload)
+    raw_items, structure = _extract_snapshot_items(payload)
+
+    if structure in ("unknown", "dict.error"):
+        print(f"  [download失敗] snapshot_id={snapshot_id}: レスポンス構造={structure}")
+        return False, [], "error"
+
+    items = [item for item in raw_items if isinstance(item, dict)]
+    print(
+        f"  [download完了] snapshot_id={snapshot_id}: "
+        f"{len(items)}件解析済み (全{len(raw_items)}件, 構造={structure})"
+    )
+    return True, items, "ready"
+
+
 def _print_batch_fetch_summary(
     posts: list,
     snapshot_meta: list,
@@ -1013,114 +1068,46 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
         f"(1バッチ最大{ACCOUNTS_PER_BATCH}アカウント, 1アカウント最大{results_limit}件)"
     )
 
-    # 2026-07-18: 前回タイムアウトした未完了ジョブのsnapshot_idを読み込む。
-    # 同じバッチキーで重複ジョブを作らないための排他制御にも使う。
+    # 前回タイムアウトした未完了ジョブのsnapshot_idを読み込む。
     pending = _load_pending_snapshots()
-    updated_pending = dict(pending)  # 書き戻し用コピー
+    updated_pending = dict(pending)
 
     failed_accounts = []
     fetch_start = time.monotonic()
 
-    for batch_index, batch_usernames in enumerate(batches, start=1):
-        elapsed = time.monotonic() - fetch_start
-        if elapsed >= FETCH_TOTAL_BUDGET_SEC:
-            remaining = len(batches) - batch_index + 1
-            print(
-                f"[API TIMEOUT] Bright Data 全体予算{FETCH_TOTAL_BUDGET_SEC}秒を超過({elapsed:.0f}秒経過)。"
-                f"残り{remaining}バッチをスキップして次の処理へ進みます。"
-            )
-            failed_accounts.extend(
-                u for b in batches[batch_index - 1:] for u in b
-            )
-            break
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # フェーズ1: 全バッチを一括 trigger（非同期化の核心）
+    # 各バッチごとに trigger → 即時 snapshot_id 取得。待たずに次へ進む。
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-        # バッチキー: アカウント名ソート済み文字列で一意に識別
+    # running_jobs: {batch_key: {snapshot_id, accounts, batch_index}} — ポーリング対象
+    running_jobs: dict[str, dict] = {}
+
+    print()
+    print(f"  ─ フェーズ1: 全{len(batches)}バッチを一括 trigger ─")
+    for batch_index, batch_usernames in enumerate(batches, start=1):
         batch_key = "|".join(sorted(batch_usernames))
 
-        # 2026-07-18: 前回未完了のsnapshot_idがある場合は先に状態確認する
+        # 前回未完了ジョブがある場合: 状態確認してrunningならそのまま流用、readyなら後でdownload
         if batch_key in pending:
-            pending_info = pending[batch_key]
-            pending_sid = pending_info.get("snapshot_id")
-            print(
-                f"  [{category}] バッチ{batch_index}: 前回未完了snapshot_id={pending_sid}を確認中..."
-            )
+            pending_sid = pending[batch_key].get("snapshot_id")
             status = _check_snapshot_status(pending_sid)
-            if status == "ready":
-                print(f"  [{category}] バッチ{batch_index}: snapshot準備完了(status=ready)。結果を取得します")
-                recovered_count = 0
-                try:
-                    snapshot_resp = _request_with_retry(
-                        "GET",
-                        f"{API_BASE}/datasets/v3/snapshot/{pending_sid}",
-                        params={"format": "json"},
-                        timeout=60,
-                    )
-                    payload = snapshot_resp.json()
-                    _save_debug_snapshot(payload)
-                    raw_items, structure = _extract_snapshot_items(payload)
-                    items = [item for item in raw_items if isinstance(item, dict)]
-                    recovered_count = len(items)
-                    print(f"  [{category}] バッチ{batch_index}: 未完了ジョブから{recovered_count}件取得しました")
-                    for item in raw_items:
-                        owner_username = _get_first(item, ["user_posted"], "") or ""
-                        posts.append(
-                            _normalize_post(item, source_account=owner_username, category=category)
-                        )
-                    del updated_pending[batch_key]
-                    snapshot_meta.append({
-                        "batch_key": batch_key,
-                        "snapshot_id": pending_sid,
-                        "bd_status": "recovered",
-                        "error_msg": "",
-                        "accounts": batch_usernames,
-                        "recovered": True,
-                        "recovered_count": recovered_count,
-                    })
-                except Exception as e:
-                    err = f"未完了ジョブの取得中にエラー: {e}"
-                    print(f"  [{category}] バッチ{batch_index}: {err}")
-                    snapshot_meta.append({
-                        "batch_key": batch_key,
-                        "snapshot_id": pending_sid,
-                        "bd_status": "error",
-                        "error_msg": err,
-                        "accounts": batch_usernames,
-                        "recovered": False,
-                    })
-                continue
-            elif status == "running":
-                msg = f"Bright Dataジョブはstatus=runningのまま待機時間を超過。結果未回収(snapshot_id={pending_sid})"
-                print(
-                    f"  [{category}] バッチ{batch_index}: まだ処理中(status=running)です。"
-                    f"このバッチはスキップして次回確認します(snapshot_id={pending_sid})"
-                )
-                failed_accounts.extend(batch_usernames)
-                snapshot_meta.append({
-                    "batch_key": batch_key,
+            print(
+                f"  バッチ{batch_index}/{len(batches)}: "
+                f"前回pending snapshot_id={pending_sid} → status={status}"
+            )
+            if status in ("ready", "running"):
+                running_jobs[batch_key] = {
                     "snapshot_id": pending_sid,
-                    "bd_status": "running",
-                    "error_msg": msg,
                     "accounts": batch_usernames,
-                    "recovered": False,
-                })
+                    "batch_index": batch_index,
+                    "recovered": status == "ready",  # readyならdownloadへ即進める
+                }
                 continue
             elif status == "failed":
-                print(
-                    f"  [{category}] バッチ{batch_index}: Bright Data APIエラー（status=failed）。"
-                    f"snapshot_id={pending_sid}"
-                )
-                snapshot_meta.append({
-                    "batch_key": batch_key,
-                    "snapshot_id": pending_sid,
-                    "bd_status": "failed",
-                    "error_msg": "Bright Data APIエラー（status=failed）",
-                    "accounts": batch_usernames,
-                    "recovered": False,
-                })
                 del updated_pending[batch_key]
-                # fallthrough: 新規ジョブを作成する
+                # fallthrough: 新規trigger
             else:
-                print(f"  [{category}] バッチ{batch_index}: 状態不明(status={status})。新規ジョブを作成します")
                 del updated_pending[batch_key]
 
         input_list = [
@@ -1132,121 +1119,194 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             }
             for username in batch_usernames
         ]
-
         print(
-            f"  [{category}] バッチ{batch_index}/{len(batches)}: "
+            f"  バッチ{batch_index}/{len(batches)}: trigger → "
             f"{', '.join(batch_usernames)}"
         )
+        snapshot_id, bd_status = _trigger_batch(input_list)
 
-        # 2026-07-18: trigger直後にsnapshot_idを即時永続化するコールバック。
-        # ポーリング中にプロセスがクラッシュしても snapshot_id を失わない。
-        def _on_snapshot_id(sid, _key=batch_key, _accts=batch_usernames):
-            updated_pending[_key] = {
-                "snapshot_id": sid,
-                "accounts": _accts,
-                "triggered_at": now.isoformat(),
-                "bd_status": "running",
-            }
-            _save_pending_snapshots(updated_pending)
-            print(f"  [{category}] snapshot_id={sid} を即時保存しました(pending_snapshots.json)")
-
-        try:
-            ok, raw_items, returned_sid, bd_status = _trigger_and_collect(
-                REELS_DATASET_ID, REELS_DISCOVER_QUERY, input_list,
-                on_snapshot_id=_on_snapshot_id,
-            )
-        except Exception as e:
-            # _trigger_and_collect内で例外は処理済みのはずだが、念のため
-            # ここでも捕まえて、このバッチだけ失敗とし、全体は止めない。
-            err = f"予期しないエラー: {e}"
-            print(f"  [{category}] バッチ{batch_index}で{err}")
+        if snapshot_id is None:
+            print(f"  バッチ{batch_index}: trigger 失敗 → スキップ")
             failed_accounts.extend(batch_usernames)
             snapshot_meta.append({
                 "batch_key": batch_key,
                 "snapshot_id": None,
-                "bd_status": "error",
-                "error_msg": err,
+                "bd_status": "trigger_failed",
+                "error_msg": "Bright Data triggerに失敗（snapshot_id未取得）",
                 "accounts": batch_usernames,
                 "recovered": False,
             })
             continue
 
-        if not ok:
-            # bd_statusに応じてエラーメッセージを分ける
-            if bd_status == "running":
-                error_msg = "Bright Dataジョブはstatus=runningのまま待機時間を超過。結果未回収"
-            elif bd_status == "failed":
-                error_msg = "Bright Data APIエラー（status=failed）"
-            else:
-                error_msg = f"Bright Data取得失敗（bd_status={bd_status}）"
-
-            # pending情報はon_snapshot_id経由で既に保存済み。
-            # on_snapshot_idが呼ばれなかった場合(trigger_failed)は returned_sid=None。
-            if returned_sid:
-                # pending に bd_status を更新
-                if batch_key in updated_pending:
-                    updated_pending[batch_key]["bd_status"] = bd_status
-                    updated_pending[batch_key]["error_msg"] = error_msg
-                print(
-                    f"  [{category}] バッチ{batch_index}: {error_msg}"
-                    f"(snapshot_id={returned_sid})"
-                )
-            else:
-                print(
-                    f"  [{category}] バッチ{batch_index}は失敗しました(snapshot_id取得不可): "
-                    f"{', '.join(batch_usernames)}"
-                )
-            snapshot_meta.append({
-                "batch_key": batch_key,
-                "snapshot_id": returned_sid,
-                "bd_status": bd_status,
-                "error_msg": error_msg,
-                "accounts": batch_usernames,
-                "recovered": False,
-            })
-            failed_accounts.extend(batch_usernames)
-            continue
-
-        # 成功時: pendingから削除
-        if batch_key in updated_pending:
-            del updated_pending[batch_key]
-
-        snapshot_meta.append({
-            "batch_key": batch_key,
-            "snapshot_id": returned_sid,
-            "bd_status": "ready",
-            "error_msg": "",
+        print(f"  バッチ{batch_index}: snapshot_id={snapshot_id} 取得 → ポーリング待機へ")
+        # trigger直後に即時永続化
+        updated_pending[batch_key] = {
+            "snapshot_id": snapshot_id,
             "accounts": batch_usernames,
+            "triggered_at": now.isoformat(),
+            "bd_status": "running",
+        }
+        _save_pending_snapshots(updated_pending)
+
+        running_jobs[batch_key] = {
+            "snapshot_id": snapshot_id,
+            "accounts": batch_usernames,
+            "batch_index": batch_index,
             "recovered": False,
-        })
+        }
 
-        if not raw_items:
-            print(
-                f"  [{category}] バッチ{batch_index}は0件でした"
-                f"(対象期間内に取得対象データが無い可能性があります): {', '.join(batch_usernames)}"
-            )
-            continue
+    print(f"  ─ フェーズ1完了: {len(running_jobs)}バッチのtrigger成功 ─")
+    print()
 
-        error_items = [item for item in raw_items if _is_error_item(item)]
-        if error_items:
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # フェーズ2: 全スナップショットを巡回ポーリング → ready になり次第 download
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    remaining_jobs = dict(running_jobs)  # コピー: 完了したものは削除していく
+    poll_deadline = fetch_start + FETCH_TOTAL_BUDGET_SEC
+
+    print(f"  ─ フェーズ2: {len(remaining_jobs)}バッチのポーリング開始 ─")
+
+    while remaining_jobs:
+        elapsed = time.monotonic() - fetch_start
+        if time.monotonic() >= poll_deadline:
+            timed_out = list(remaining_jobs.keys())
             print(
-                f"  [{category}] バッチ{batch_index}: "
-                f"{len(error_items)}/{len(raw_items)}件が取得失敗または空データです"
+                f"  [タイムアウト] 全体予算{FETCH_TOTAL_BUDGET_SEC}秒を超過({elapsed:.0f}秒)。"
+                f"残り{len(timed_out)}バッチを未回収としてpending保存します。"
             )
-            seen_targets = set()
-            for item in error_items:
-                desc = _describe_error_item(item)
-                target = desc.split(":", 1)[0]
-                if target in seen_targets:
+            for bkey in timed_out:
+                job = remaining_jobs[bkey]
+                failed_accounts.extend(job["accounts"])
+                snapshot_meta.append({
+                    "batch_key": bkey,
+                    "snapshot_id": job["snapshot_id"],
+                    "bd_status": "running",
+                    "error_msg": "全体タイムアウトにより未回収",
+                    "accounts": job["accounts"],
+                    "recovered": False,
+                })
+                if bkey in updated_pending:
+                    updated_pending[bkey]["bd_status"] = "running"
+            break
+
+        completed_this_round = []
+        for bkey, job in remaining_jobs.items():
+            sid = job["snapshot_id"]
+            bi = job["batch_index"]
+            batch_usernames = job["accounts"]
+            already_ready = job.get("recovered", False)
+
+            if already_ready:
+                status = "ready"
+            else:
+                status = _check_snapshot_status(sid)
+                print(
+                    f"  バッチ{bi}/{len(batches)} [{', '.join(batch_usernames[:2])}{"..." if len(batch_usernames)>2 else ""}]"
+                    f" snapshot_id={sid} → status={status}"
+                )
+
+            if status == "ready":
+                ok, items, dl_status = _download_snapshot(sid)
+                completed_this_round.append(bkey)
+
+                if not ok:
+                    failed_accounts.extend(batch_usernames)
+                    snapshot_meta.append({
+                        "batch_key": bkey,
+                        "snapshot_id": sid,
+                        "bd_status": "error",
+                        "error_msg": "download失敗",
+                        "accounts": batch_usernames,
+                        "recovered": job.get("recovered", False),
+                    })
+                    if bkey in updated_pending:
+                        del updated_pending[bkey]
                     continue
-                seen_targets.add(target)
-                print(f"    - {desc}")
 
-        for item in raw_items:
-            owner_username = _get_first(item, ["user_posted"], "") or ""
-            posts.append(
-                _normalize_post(item, source_account=owner_username, category=category)
+                # download 成功
+                recovered_flag = job.get("recovered", False)
+                if bkey in updated_pending:
+                    del updated_pending[bkey]
+
+                if not items:
+                    print(
+                        f"  バッチ{bi}: 0件でした"
+                        f"(対象期間内に投稿なし): {', '.join(batch_usernames)}"
+                    )
+
+                # エラー投稿ログ
+                error_items = [item for item in items if _is_error_item(item)]
+                if error_items:
+                    print(
+                        f"  バッチ{bi}: {len(error_items)}/{len(items)}件が取得失敗または空データ"
+                    )
+                    seen_targets: set = set()
+                    for item in error_items:
+                        desc = _describe_error_item(item)
+                        target = desc.split(":", 1)[0]
+                        if target not in seen_targets:
+                            seen_targets.add(target)
+                            print(f"    - {desc}")
+
+                for item in items:
+                    owner_username = _get_first(item, ["user_posted"], "") or ""
+                    posts.append(
+                        _normalize_post(item, source_account=owner_username, category=category)
+                    )
+
+                snapshot_meta.append({
+                    "batch_key": bkey,
+                    "snapshot_id": sid,
+                    "bd_status": "ready",
+                    "error_msg": "",
+                    "accounts": batch_usernames,
+                    "recovered": recovered_flag,
+                    **({"recovered_count": len(items)} if recovered_flag else {}),
+                })
+
+            elif status == "failed":
+                completed_this_round.append(bkey)
+                print(f"  バッチ{bi}: Bright Data APIエラー（status=failed, snapshot_id={sid}）")
+                failed_accounts.extend(batch_usernames)
+                snapshot_meta.append({
+                    "batch_key": bkey,
+                    "snapshot_id": sid,
+                    "bd_status": "failed",
+                    "error_msg": "Bright Data APIエラー（status=failed）",
+                    "accounts": batch_usernames,
+                    "recovered": False,
+                })
+                if bkey in updated_pending:
+                    del updated_pending[bkey]
+
+            elif status == "error":
+                completed_this_round.append(bkey)
+                failed_accounts.extend(batch_usernames)
+                snapshot_meta.append({
+                    "batch_key": bkey,
+                    "snapshot_id": sid,
+                    "bd_status": "error",
+                    "error_msg": "progress API 呼び出し失敗",
+                    "accounts": batch_usernames,
+                    "recovered": False,
+                })
+
+            # running の場合は次のラウンドへ
+
+        for bkey in completed_this_round:
+            del remaining_jobs[bkey]
+
+        if remaining_jobs:
+            elapsed = time.monotonic() - fetch_start
+            remaining_secs = poll_deadline - time.monotonic()
+            print(
+                f"  ─ {len(remaining_jobs)}バッチまだ処理中。"
+                f"{POLL_INTERVAL_SEC}秒後に再確認 (残り{remaining_secs:.0f}秒) ─"
             )
+            time.sleep(POLL_INTERVAL_SEC)
+
+    print(f"  ─ フェーズ2完了 ─")
+    print()
 
     if failed_accounts:
         print(
