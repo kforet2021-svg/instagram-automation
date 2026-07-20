@@ -1,6 +1,32 @@
 """
 research_candidate_score.py
-取得・プール済みの投稿1件ごとに「Research Candidate Score」(0〜100点)を計算するモジュール。
+取得・プール済みの投稿1件ごとに「Research Candidate Score」(0〜80点)を計算するモジュール。
+
+【2026-07-17: スコアリング大幅改修】
+ユーザー要望:「再生数が0または未取得でも投稿日・動画尺・投稿頻度だけで高得点になり
+実績を正しく評価できていない」
+
+変更内容(実装前に仕様を書面確認済み):
+1. 再生数0または欠損の場合: 再生数_点=0・再生倍率_点=0・tier="評価保留"。
+   sort_by_score/select_for_analysisの通常ランキングから除外し、
+   split_by_views_availability でEngagement参考候補として別管理する。
+2. いいね率・コメント率の分母をviews→followersに変更。
+   (フォロワー数0または欠損の場合は0点のまま)
+3. 投稿頻度の最大配点: 10点→2点
+4. 動画時間の最大配点: 10点→3点
+5. 投稿からの日数の最大配点: 10点→5点
+6. split_by_views_availability() 追加: (再生数あり, 再生数なし) のタプルを返す
+7. sort_no_views_by_engagement() 追加: 再生数なし投稿をエンゲージメント率降順に並べる
+8. 異常値チェック(anomalies フィールド)追加:
+   - "要データ確認" : いいね率がフォロワー数の100%超
+   - "取得エラー"   : 投稿日が未来
+   - "再生数未取得" : 再生数0なのにいいね数が存在
+
+【重要: 合計最大点が100→80に変わった】
+配点変更後の最大合計 = 再生数(10) + 再生倍率(30) + いいね率(15) + コメント率(15)
+                      + 投稿からの日数(5) + 動画時間(3) + 投稿頻度(2) = 80点。
+ANALYSIS_MIN_SCORE=80(=SCORE_THRESHOLD_CANDIDATE)は「再生数あり投稿で全項目
+ほぼ満点」を意味するため、実運用では閾値の引き下げを検討してください。
 
 【2026-07-05: trend_score.py からのリネーム + AI分析しきい値ゲート復活】
 ユーザー要望:「Trend Scoreを廃止してください。代わりにResearch Candidate Scoreを
@@ -154,14 +180,25 @@ trend_score_debugシートで実データを確認した結果を踏まえ、ユ
 """
 
 import datetime as dt
+from collections import deque as _deque
 
 # --- スコアしきい値・判定ラベル ---
 SCORE_THRESHOLD_MUST_ANALYZE = 90
 SCORE_THRESHOLD_CANDIDATE = 80
 
+# --- 同一アカウント上限 ---
+MAX_POSTS_PER_ACCOUNT = 2         # ①②③ 1アカウントから採用する最大投稿数
+MIN_ACCOUNTS_FOR_TREND = 10       # ⑤ Trend Analysis に必要な最低アカウント数
+BIAS_THRESHOLD = 0.20             # ⑦ 1アカウント占有率がこの値以上で「偏りあり」
+
+# --- 分析対象期間・目標件数 ---
+RESEARCH_WINDOW_DAYS = 10   # 分析対象とする投稿の直近日数(2026-07-18)
+MIN_CANDIDATE_POSTS  = 20   # Research Candidateの目標最低件数(2026-07-18)
+
 TIER_MUST_ANALYZE = "必ず分析"
 TIER_CANDIDATE = "投稿案候補"
 TIER_SAVE_ONLY = "保存のみ"
+TIER_PENDING = "評価保留"  # 再生数0または欠損の投稿(通常ランキングから除外)
 
 # 表示用ラベル(classify_tier)のしきい値。2026-07-05: AI分析を実行するかどうかの
 # 判定にも再びこの値を使う(select_for_analysis参照。2026-07-02〜2026-07-05の間は
@@ -253,55 +290,71 @@ def _score_view_multiplier(view_multiplier) -> int:
     return 1
 
 
-def _score_like_rate(likes: int, views: int) -> int:
-    if not views:
+def _score_like_rate(likes: int, followers) -> int:
+    """
+    【2026-07-17】分母をviews→followersに変更。
+    いいね率 = いいね数 ÷ フォロワー数。フォロワー数0または欠損の場合は0点。
+    しきい値はフォロワー数ベースのInstagram一般的エンゲージメント率に合わせて調整。
+    """
+    if not followers:
         return 0
-    rate = likes / views
-    if rate >= 0.10:
+    rate = likes / followers
+    if rate >= 0.05:   # 5%超: 非常に高エンゲージメント
         return 15
-    if rate >= 0.07:
+    if rate >= 0.03:   # 3%超: 高エンゲージメント
         return 12
-    if rate >= 0.05:
+    if rate >= 0.01:   # 1%超: 平均以上
         return 9
-    if rate >= 0.03:
+    if rate >= 0.005:  # 0.5%超: 平均的
         return 6
-    if rate >= 0.01:
+    if rate >= 0.001:  # 0.1%超: 低め
         return 3
     return 0
 
 
-def _score_comment_rate(comments: int, views: int) -> int:
-    if not views:
+def _score_comment_rate(comments: int, followers) -> int:
+    """
+    【2026-07-17】分母をviews→followersに変更。
+    コメント率 = コメント数 ÷ フォロワー数。フォロワー数0または欠損の場合は0点。
+    コメントはいいねより行動コストが高いため、しきい値はいいね率より低く設定。
+    """
+    if not followers:
         return 0
-    rate = comments / views
-    if rate >= 0.01:
+    rate = comments / followers
+    if rate >= 0.005:   # 0.5%超: 非常に高い
         return 15
-    if rate >= 0.005:
+    if rate >= 0.002:   # 0.2%超: 高い
         return 12
-    if rate >= 0.002:
+    if rate >= 0.001:   # 0.1%超: 平均以上
         return 9
-    if rate >= 0.001:
+    if rate >= 0.0005:  # 0.05%超: 平均的
         return 6
-    if rate >= 0.0003:
+    if rate >= 0.0001:  # 0.01%超: 低め
         return 3
     return 0
 
 
 def _score_recency(posted_at_dt) -> int:
+    """
+    【2026-07-17】最大配点を10点→5点に変更。
+    投稿日が未来の場合は0点(異常値として_check_anomaliesで別途検出)。
+    """
     if posted_at_dt is None:
         return 0
     now = dt.datetime.now(dt.timezone.utc)
     days = (now - posted_at_dt).total_seconds() / 86400
+    if days < 0:
+        return 0  # 未来日付は0点(取得エラー扱い)
     if days <= 2:
-        return 10
+        return 5
     if days <= 5:
-        return 8
-    if days <= 10:
-        return 6
-    if days <= 15:
         return 4
-    if days <= 20:
+    if days <= 10:
+        return 3
+    if days <= 15:
         return 2
+    if days <= 20:
+        return 1
     return 0
 
 
@@ -310,15 +363,16 @@ def _score_duration(duration_sec) -> int:
     ※実測値(モジュールdocstring参照)。bright_data_fetcherのduration_sec
     (Bright Data "length" フィールド)をそのまま使う。キャプションのキーワード
     推定は行わない。
+    【2026-07-17】最大配点を10点→3点に変更。
     """
     if duration_sec is None:
         return 0
     if _DURATION_BEST_RANGE[0] <= duration_sec <= _DURATION_BEST_RANGE[1]:
-        return 10
+        return 3
     if _DURATION_OK_RANGE[0] <= duration_sec <= _DURATION_OK_RANGE[1]:
-        return 7
+        return 2
     if _DURATION_MARGINAL_RANGE[0] <= duration_sec <= _DURATION_MARGINAL_RANGE[1]:
-        return 4
+        return 1
     return 0
 
 
@@ -327,21 +381,23 @@ def _score_post_frequency(account_post_count_window) -> int:
     ※実測値(モジュールdocstring参照)。bright_data_fetcher._attach_account_
     post_countsが付与するpost["account_post_count_window"](今回の取得窓内で
     同じアカウントから取得できた投稿数)を使う。
+    【2026-07-17】最大配点を10点→2点に変更。
     """
     if not account_post_count_window:
         return 0
-    if account_post_count_window >= 8:
-        return 10
     if account_post_count_window >= 6:
-        return 8
-    if account_post_count_window >= 4:
-        return 6
+        return 2
     if account_post_count_window >= 2:
-        return 3
+        return 1
     return 0
 
 
-def classify_tier(total: int) -> str:
+def classify_tier(total: int, views_available: bool = True) -> str:
+    """
+    【2026-07-17】views_available=Falseの場合は TIER_PENDING("評価保留")を返す。
+    """
+    if not views_available:
+        return TIER_PENDING
     if total >= SCORE_THRESHOLD_MUST_ANALYZE:
         return TIER_MUST_ANALYZE
     if total >= SCORE_THRESHOLD_CANDIDATE:
@@ -349,44 +405,79 @@ def classify_tier(total: int) -> str:
     return TIER_SAVE_ONLY
 
 
+def _check_anomalies(views: int, likes: int, followers, posted_at_dt) -> list:
+    """
+    【2026-07-17】異常値を検出してラベルのリストを返す(複数同時に発生しうる)。
+    - "再生数未取得" : 再生数0なのにいいね数が存在する(再生数の取得漏れを疑う)
+    - "要データ確認" : いいね数がフォロワー数を超えている(データ異常を疑う)
+    - "取得エラー"   : 投稿日が未来(APIの日付取得エラーを疑う)
+    """
+    anomalies = []
+    if not views and likes:
+        anomalies.append("再生数未取得")
+    if followers and likes and likes > followers:
+        anomalies.append("要データ確認")
+    if posted_at_dt is not None:
+        now = dt.datetime.now(dt.timezone.utc)
+        if posted_at_dt > now:
+            anomalies.append("取得エラー")
+    return anomalies
+
+
 def compute_research_candidate_score(post: dict) -> dict:
     """
-    投稿1件のResearch Candidate Score(0〜100点)を計算する。
+    投稿1件のResearch Candidate Score(0〜80点)を計算する。
+
+    【2026-07-17】配点の最大合計が100→80に変わった点に注意。
+    再生数0/欠損の場合は再生数・再生倍率が強制0点、tierが"評価保留"になる。
+    いいね率・コメント率はフォロワー数を分母に使う(viewsは使わない)。
 
     post: bright_data_fetcher._normalize_post() が返す投稿dict
-          (views, likes, comments, view_multiplier, posted_at_dt, duration_sec,
-          account_post_count_windowを使う)
+          (views, likes, comments, followers, view_multiplier, posted_at_dt,
+          duration_sec, account_post_count_windowを使う)
 
     戻り値:
     {
-        "total": int,                 # 0〜100点
-        "breakdown": {                # BREAKDOWN_KEYSの各項目の得点
+        "total": int,              # 0〜80点(再生数なしは最大40点)
+        "breakdown": {             # BREAKDOWN_KEYSの各項目の得点
             "再生数": int, "再生倍率": int, "いいね率": int, "コメント率": int,
             "投稿からの日数": int, "動画時間": int, "投稿頻度": int,
         },
-        "tier": "必ず分析" | "投稿案候補" | "保存のみ",
+        "tier": "必ず分析" | "投稿案候補" | "保存のみ" | "評価保留",
+        "views_available": bool,   # 再生数が取得できているか
+        "anomalies": list[str],    # 異常値ラベルのリスト(正常なら空リスト)
     }
     """
     views = post.get("views", 0) or 0
     likes = post.get("likes", 0) or 0
     comments = post.get("comments", 0) or 0
+    followers = post.get("followers")
     view_multiplier = post.get("view_multiplier")
     posted_at_dt = post.get("posted_at_dt")
     duration_sec = post.get("duration_sec")
     account_post_count_window = post.get("account_post_count_window")
 
+    views_available = bool(views)
+    anomalies = _check_anomalies(views, likes, followers, posted_at_dt)
+
     breakdown = {
-        "再生数": _score_views(views),
-        "再生倍率": _score_view_multiplier(view_multiplier),
-        "いいね率": _score_like_rate(likes, views),
-        "コメント率": _score_comment_rate(comments, views),
+        "再生数": _score_views(views) if views_available else 0,
+        "再生倍率": _score_view_multiplier(view_multiplier) if views_available else 0,
+        "いいね率": _score_like_rate(likes, followers),
+        "コメント率": _score_comment_rate(comments, followers),
         "投稿からの日数": _score_recency(posted_at_dt),
         "動画時間": _score_duration(duration_sec),
         "投稿頻度": _score_post_frequency(account_post_count_window),
     }
     total = sum(breakdown.values())
 
-    return {"total": total, "breakdown": breakdown, "tier": classify_tier(total)}
+    return {
+        "total": total,
+        "breakdown": breakdown,
+        "tier": classify_tier(total, views_available),
+        "views_available": views_available,
+        "anomalies": anomalies,
+    }
 
 
 def score_posts(posts: list) -> list:
@@ -402,12 +493,84 @@ def score_posts(posts: list) -> list:
 
 def sort_by_score(posts: list) -> list:
     """
-    score_posts()済みの投稿リストを、Research Candidate Score合計が高い順に
-    並べ替える。posts自体をin-placeで並べ替えて返す
-    (main.pyがresearch_candidatesシート保存前に呼ぶ)。
+    score_posts()済みの投稿リストを並べ替える。
+
+    【2026-07-17】再生数あり投稿(Research Candidate Ranking)を先頭グループに、
+    再生数なし投稿(Engagement参考候補)を末尾グループに配置する。
+    各グループ内では Research Candidate Score合計降順。
+    posts自体をin-placeで並べ替えて返す。
     """
-    posts.sort(key=lambda p: (p.get("research_candidate_score") or {}).get("total", 0), reverse=True)
+    def _sort_key(p):
+        score = (p.get("research_candidate_score") or {})
+        views_available = score.get("views_available", True)
+        total = score.get("total", 0)
+        return (0 if views_available else 1, -total)
+
+    posts.sort(key=_sort_key)
     return posts
+
+
+def split_by_views_availability(posts: list) -> tuple:
+    """
+    【2026-07-17】score_posts()済みの投稿リストを再生数あり/なしに分割する。
+
+    戻り値: (posts_with_views, posts_without_views)
+    - posts_with_views   : Research Candidate Ranking対象(通常ランキング)
+    - posts_without_views: Engagement参考候補(いいね率・コメント率で並べ直す)
+    """
+    with_views = [
+        p for p in (posts or [])
+        if (p.get("research_candidate_score") or {}).get("views_available", True)
+    ]
+    without_views = [
+        p for p in (posts or [])
+        if not (p.get("research_candidate_score") or {}).get("views_available", True)
+    ]
+    return with_views, without_views
+
+
+def sort_no_views_by_engagement(posts: list) -> list:
+    """
+    【2026-07-17】再生数なし投稿をエンゲージメント率(いいね+コメント)÷フォロワー降順に並べる。
+    Engagement参考候補の表示順に使う。
+    """
+    def _engagement_key(p):
+        likes = p.get("likes", 0) or 0
+        comments = p.get("comments", 0) or 0
+        followers = p.get("followers") or 0
+        if not followers:
+            return 0.0
+        return (likes + comments) / followers
+
+    posts.sort(key=_engagement_key, reverse=True)
+    return posts
+
+
+# Trend Analysis で優先するキーワード（施術・セルフケア・顔の変化・表情筋・姿勢・美容知識）
+_TREND_PREFERRED_KEYWORDS = (
+    "施術", "セルフケア", "顔の変化", "表情筋", "顔筋", "姿勢", "美容知識",
+    "小顔", "たるみ", "むくみ", "リフトアップ", "フェイスライン", "骨格",
+    "顔矯正", "顔トレ", "ビフォーアフター", "before after",
+)
+
+# Trend Analysis から除外する商品販売主体キーワード
+_TREND_EXCLUDE_KEYWORDS = (
+    "通販", "販売中", "お買い物", "ec限定", "楽天", "amazon", "アマゾン",
+    "購入はこちら", "ショッピング", "商品紹介", "商品レビュー", "お試しセット",
+    "ポイント還元", "割引", "セール", "クーポン", "キャンペーン価格",
+)
+
+
+def _is_product_sales_post(post: dict) -> bool:
+    """商品販売中心のリールかどうかを判定する。"""
+    text = ((post.get("caption") or "") + " " + " ".join(post.get("hashtags") or [])).lower()
+    return any(kw in text for kw in _TREND_EXCLUDE_KEYWORDS)
+
+
+def _has_preferred_content(post: dict) -> bool:
+    """施術・セルフケア系コンテンツが含まれているか判定する。"""
+    text = ((post.get("caption") or "") + " " + " ".join(post.get("hashtags") or [])).lower()
+    return any(kw in text for kw in _TREND_PREFERRED_KEYWORDS)
 
 
 def select_for_analysis(posts: list, top_n: int = TOP_N_FOR_ANALYSIS) -> list:
@@ -423,11 +586,159 @@ def select_for_analysis(posts: list, top_n: int = TOP_N_FOR_ANALYSIS) -> list:
     より「研究対象として価値がある投稿だけを分析する」をユーザーが優先した
     結果であり、想定どおりの挙動)。呼び出し側(main.py)は空リストを前提に
     ハンドリングすること。
+
+    【2026-07-17】tier="評価保留"(再生数なし)の投稿は対象から除外する。
+    再生数なし投稿は別途 split_by_views_availability / sort_no_views_by_engagement
+    でEngagement参考候補として管理する(AI分析は行わない)。
+
+    【2026-07-20】商品販売主体のリールをTrend Analysisから除外。
+    施術・セルフケア・顔の変化・表情筋・姿勢・美容知識系コンテンツを優先選出。
     """
     scored = [
         p for p in (posts or [])
         if p.get("research_candidate_score")
+        and p["research_candidate_score"].get("views_available", True)
         and p["research_candidate_score"]["total"] >= ANALYSIS_MIN_SCORE
+        and not _is_product_sales_post(p)
     ]
     scored.sort(key=lambda p: p["research_candidate_score"]["total"], reverse=True)
-    return scored[:top_n]
+
+    # 施術・セルフケア系を優先: preferred を先頭に、残りを後ろに
+    preferred = [p for p in scored if _has_preferred_content(p)]
+    others    = [p for p in scored if not _has_preferred_content(p)]
+    ordered   = preferred + others
+
+    return ordered[:top_n]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 同一アカウント上限・統計・インターリーブ (2026-07-18追加)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _account_key(post: dict) -> str:
+    """投稿の所有アカウントを一意に識別するキー。"""
+    return (
+        (post.get("source_account") or "").strip().lower()
+        or (post.get("username") or "").strip().lower()
+        or "_unknown_"
+    )
+
+
+def limit_per_account(
+    posts: list,
+    max_per_account: int = MAX_POSTS_PER_ACCOUNT,
+) -> tuple:
+    """
+    【2026-07-18: ①②③】同一アカウントから採用する投稿をmax_per_account件に制限する。
+
+    score_posts() + sort_by_score()済みリストを想定(スコア降順が前提)。
+    アカウント内では先頭max_per_account件を残し、3件目以降は除外する。
+
+    除外された投稿には post["pool_exclusion_reason"] = "同一アカウント上限" を付与する。
+
+    Returns:
+        (accepted: list, excluded: list)
+    """
+    counts: dict = {}
+    accepted: list = []
+    excluded: list = []
+    for post in posts or []:
+        key = _account_key(post)
+        cnt = counts.get(key, 0) + 1
+        counts[key] = cnt
+        if cnt <= max_per_account:
+            accepted.append(post)
+        else:
+            post["pool_exclusion_reason"] = "同一アカウント上限"
+            excluded.append(post)
+    return accepted, excluded
+
+
+def compute_account_stats(posts: list) -> dict:
+    """
+    【2026-07-18: ④⑤⑥⑦】投稿リストのアカウント別集計情報を返す。
+
+    Returns dict:
+        total_posts       : int   — 投稿総数
+        account_count     : int   — ユニークアカウント数
+        max_account       : str   — 最多投稿アカウント名
+        max_count         : int   — そのアカウントの投稿数
+        max_ratio         : float — 占有率 (0.0〜1.0)
+        has_bias          : bool  — max_ratio >= BIAS_THRESHOLD
+        has_min_accounts  : bool  — account_count >= MIN_ACCOUNTS_FOR_TREND
+        details           : dict  — {account: count, ...}
+    """
+    details: dict = {}
+    for p in posts or []:
+        k = _account_key(p)
+        details[k] = details.get(k, 0) + 1
+
+    total = len(posts or [])
+    if not details or total == 0:
+        return {
+            "total_posts": 0, "account_count": 0, "max_account": "",
+            "max_count": 0, "max_ratio": 0.0,
+            "has_bias": False, "has_min_accounts": False, "details": {},
+        }
+
+    max_acc = max(details, key=details.get)
+    max_cnt = details[max_acc]
+    max_ratio = max_cnt / total
+
+    return {
+        "total_posts": total,
+        "account_count": len(details),
+        "max_account": max_acc,
+        "max_count": max_cnt,
+        "max_ratio": max_ratio,
+        "has_bias": max_ratio >= BIAS_THRESHOLD,
+        "has_min_accounts": len(details) >= MIN_ACCOUNTS_FOR_TREND,
+        "details": details,
+    }
+
+
+def filter_by_window(
+    posts: list,
+    days: int = RESEARCH_WINDOW_DAYS,
+) -> tuple:
+    """
+    【2026-07-18: 項目1】分析対象を直近days日以内の投稿に絞り込む。
+
+    score_posts() の前に適用することを想定。
+    期間外の投稿には post["pool_exclusion_reason"] = "期間外" を付与する
+    (既に別の除外理由がある場合は上書きしない)。
+
+    Returns: (within: list, excluded: list)
+    """
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
+    within: list = []
+    excluded: list = []
+    for post in posts or []:
+        posted_at = post.get("posted_at_dt")
+        if posted_at is not None and posted_at >= cutoff:
+            within.append(post)
+        else:
+            if not post.get("pool_exclusion_reason"):
+                post["pool_exclusion_reason"] = "期間外"
+            excluded.append(post)
+    return within, excluded
+
+
+def interleave_by_account(posts: list) -> list:
+    """
+    【2026-07-18: ⑧】同じアカウントが連続しないよう、ラウンドロビン方式で並び替える。
+    各アカウント内での順序(Research Candidate Score降順)は維持する。
+    """
+    groups: dict = {}
+    for post in posts or []:
+        k = _account_key(post)
+        groups.setdefault(k, []).append(post)
+
+    queues = _deque(_deque(g) for g in groups.values())
+    result: list = []
+    while queues:
+        q = queues.popleft()
+        result.append(q.popleft())
+        if q:
+            queues.append(q)
+    return result

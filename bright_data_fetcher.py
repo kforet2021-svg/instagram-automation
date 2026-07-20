@@ -159,6 +159,11 @@ API_BASE = "https://api.brightdata.com"
 # 最後に処理されたバッチの内容になる)。
 DEBUG_SNAPSHOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug_snapshot.json")
 
+# 2026-07-18: タイムアウトした未完了ジョブのsnapshot_idを保存するファイル。
+# タイムアウト時はsnapshot_idをここに書き込み、次回実行時に状態を再確認する。
+# 同一バッチキーで重複ジョブを作らないための排他制御にも使う。
+PENDING_SNAPSHOTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pending_snapshots.json")
+
 # Reels - Discover by URL 用のdataset_id。
 # 公式ドキュメントで「Discover by URL用には必ずこの値を使うこと」と
 # 明記されている固定値(推測ではない)。
@@ -183,8 +188,9 @@ DEFAULT_RESULTS_PER_ACCOUNT = 8  # 1アカウントあたり取得する最新�
 # アカウント・投稿数を詰め込むと600秒でもタイムアウトする」問題への
 # 対処だったため、120秒は不要に短すぎた。バッチサイズはそのままに
 # 待ち時間だけ300秒に伸ばす。
-POLL_INTERVAL_SEC = 5
-POLL_TIMEOUT_SEC = 150  # 1バッチあたりの最大待機秒数。超えたらそのバッチだけスキップ。
+POLL_INTERVAL_SEC = 15  # 2026-07-18: 5→15秒に変更。600秒タイムアウト時のAPI呼び出し過剰防止。
+POLL_TIMEOUT_SEC = 600  # 2026-07-18: 150→600秒に変更。Discover by URLは数分かかることが多い。
+# タイムアウト時はsnapshot_idをPENDING_SNAPSHOTS_PATHに保存し、次回実行時に再確認する。
 # 【2026-07-02(10回目): 全バッチを合計した最大取得時間。これを超えたら残りのバッチは
 #   スキップして後続のOpenAI分析・Creator Studioへ進む(10分以内完了要件対応)】
 FETCH_TOTAL_BUDGET_SEC = 300  # Bright Data全体に許可する最大秒数(5分)
@@ -463,6 +469,31 @@ def _is_reel(item) -> bool:
     return False
 
 
+def _get_post_type(item) -> str:
+    """
+    【2026-07-18】URL・product_type・typenameから投稿種別を判定する。
+    Returns: "Reel" / "Carousel" / "Feed"
+
+    判定順:
+    1. URL に /reel/ を含む → "Reel"
+    2. product_type が clips/reel/reels → "Reel"
+    3. video_url/video_play_count がある → "Reel"
+    4. product_type が carousel_container、または typename が GraphSidecar → "Carousel"
+    5. それ以外 → "Feed"
+    """
+    url = str(_get_first(item, ["url"], "") or "")
+    product_type = str(_get_value(item, "product_type") or "").lower()
+    typename = str(_get_value(item, "__typename") or "").lower()
+
+    if "/reel/" in url or product_type in ("clips", "reel", "reels"):
+        return "Reel"
+    if _get_first(item, ["video_url", "video_play_count"]) is not None:
+        return "Reel"
+    if product_type == "carousel_container" or typename in ("graphsidecar", "xdtstextcarousel"):
+        return "Carousel"
+    return "Feed"
+
+
 def _extract_followers(item):
     """
     フォロワー数を取得する。Reels - Discover by URLのレスポンスには
@@ -556,6 +587,7 @@ def _normalize_post(item: dict, source_account: str, category: str) -> dict:
         "posted_at_dt": posted_at_dt,
         "hashtags": hashtags,
         "is_reel": _is_reel(item),
+        "post_type": _get_post_type(item),  # 2026-07-18: "Reel" / "Carousel" / "Feed"
         "fetch_error": _is_error_item(item),
         "source_account": source_account,
         "category": category,
@@ -592,6 +624,47 @@ def _normalize_post(item: dict, source_account: str, category: str) -> dict:
 # 5. 上記すべてに当てはまらない場合のみ「構造を解釈できない」として失敗扱いに
 #    する(無理にNoneやダミーで埋めることはしない)。
 SNAPSHOT_LIST_KEYS = ["data", "items", "results", "snapshot", "result", "rows"]
+
+
+def _load_pending_snapshots() -> dict:
+    """
+    pending_snapshots.jsonから未完了ジョブ情報を読み込む。
+    形式: {batch_key: {"snapshot_id": str, "accounts": list, "triggered_at": str}}
+    ファイルが無い・読み込めない場合は空dictを返す。
+    """
+    try:
+        if os.path.exists(PENDING_SNAPSHOTS_PATH):
+            with open(PENDING_SNAPSHOTS_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"pending_snapshots.jsonの読み込みに失敗しました(本処理には影響しません): {e}")
+    return {}
+
+
+def _save_pending_snapshots(snapshots: dict) -> None:
+    """
+    未完了ジョブ情報をpending_snapshots.jsonに保存する。
+    空dictを渡すとファイルは残るがエントリが消える。
+    """
+    try:
+        with open(PENDING_SNAPSHOTS_PATH, "w", encoding="utf-8") as f:
+            json.dump(snapshots, f, ensure_ascii=False, indent=2, default=str)
+    except Exception as e:
+        print(f"pending_snapshots.jsonへの保存に失敗しました(本処理には影響しません): {e}")
+
+
+def _check_snapshot_status(snapshot_id: str) -> str:
+    """
+    既存のsnapshot_idの現在のstatus("ready"/"running"/"failed"/エラー時"error")を返す。
+    """
+    try:
+        progress_resp = _request_with_retry(
+            "GET", f"{API_BASE}/datasets/v3/progress/{snapshot_id}", timeout=30
+        )
+        return progress_resp.json().get("status", "unknown")
+    except Exception as e:
+        print(f"snapshot_id={snapshot_id}の状態確認中にエラーが発生しました: {e}")
+        return "error"
 
 
 def _save_debug_snapshot(payload) -> None:
@@ -642,16 +715,24 @@ def _extract_snapshot_items(payload) -> tuple:
     return [], "unknown"
 
 
-def _trigger_and_collect(dataset_id: str, query: dict, input_list: list) -> tuple:
+def _trigger_and_collect(
+    dataset_id: str,
+    query: dict,
+    input_list: list,
+    on_snapshot_id=None,
+) -> tuple:
     """
     Bright Dataの非同期フロー(trigger -> progress -> snapshot)を実行し、
-    (成功したかどうか, 結果のアイテムリスト) のタプルを返す。
+    (ok, items, snapshot_id, bd_status) の4要素タプルを返す。
 
-    戻り値の1つ目(ok)は「このジョブ自体が成功したか」を表す。
-    - ok=False: trigger失敗・タイムアウト・snapshot失敗などジョブ自体が失敗した
-      (このバッチの全アカウントが取得失敗扱いになる)
-    - ok=True: ジョブは成功した(items自体が0件の場合もある=対象期間内に
-      該当データが無かっただけで、失敗ではない)
+    - ok=True : ジョブ成功(items=0件でも成功扱い=対象期間内データ無し)
+    - ok=False: trigger失敗・タイムアウト・snapshot失敗などジョブが失敗した
+    - snapshot_id: trigger成功時は必ず返す(ok=Falseでも)
+    - bd_status: "ready" / "running" / "failed" / "trigger_failed" / "error"
+
+    on_snapshot_id: trigger直後に呼ぶコールバック fn(snapshot_id: str) -> None。
+      プロセスがポーリング中にクラッシュしても snapshot_id を失わないよう、
+      呼び出し側がここで即時永続化する。
 
     ジョブ単位の失敗で例外を投げることはせず、呼び出し側(_fetch_posts_for_accounts)
     がこのバッチをスキップして次のバッチに進められるようにする。
@@ -668,13 +749,18 @@ def _trigger_and_collect(dataset_id: str, query: dict, input_list: list) -> tupl
         print(f"[API END] Bright Data trigger → snapshot_id={snapshot_id}")
     except requests.RequestException as e:
         print(f"[API TIMEOUT] Bright Data trigger skipped: {e}")
-        return False, []
+        return False, [], None, "trigger_failed"
 
     if not snapshot_id:
         print("Bright Data trigger呼び出しに失敗しました: snapshot_idが返ってきませんでした")
-        return False, []
+        return False, [], None, "trigger_failed"
 
     print(f"Snapshot ID: {snapshot_id}")
+
+    # 2026-07-18: trigger直後にsnapshot_idを即時永続化する。
+    # ポーリング中にプロセスがクラッシュしても snapshot_id を失わないようにするため。
+    if on_snapshot_id:
+        on_snapshot_id(snapshot_id)
 
     deadline = time.monotonic() + POLL_TIMEOUT_SEC
     status = None
@@ -688,21 +774,21 @@ def _trigger_and_collect(dataset_id: str, query: dict, input_list: list) -> tupl
             print(f"[API END] Bright Data progress → status={status}")
         except requests.RequestException as e:
             print(f"[API TIMEOUT] Bright Data progress skipped: {e}")
-            return False, []
+            return False, [], snapshot_id, "error"
 
         if status == "ready":
             break
         if status == "failed":
-            print(f"Bright Dataの取得ジョブが失敗しました(snapshot_id={snapshot_id})")
-            return False, []
+            print(f"Bright Data APIエラー（status=failed, snapshot_id={snapshot_id}）")
+            return False, [], snapshot_id, "failed"
 
         time.sleep(POLL_INTERVAL_SEC)
     else:
         print(
-            f"Bright Dataの取得ジョブがタイムアウトしました。このバッチはスキップして次に進みます"
+            f"Bright Dataジョブはstatus=runningのまま待機時間を超過。結果未回収"
             f"(snapshot_id={snapshot_id}, {POLL_TIMEOUT_SEC}秒経過)"
         )
-        return False, []
+        return False, [], snapshot_id, "running"
 
     print(f"[API START] Bright Data snapshot download ({snapshot_id})")
     try:
@@ -716,7 +802,7 @@ def _trigger_and_collect(dataset_id: str, query: dict, input_list: list) -> tupl
         print(f"[API END] Bright Data snapshot download 完了")
     except requests.RequestException as e:
         print(f"[API TIMEOUT] Bright Data snapshot skipped: {e}")
-        return False, []
+        return False, [], snapshot_id, "error"
 
     _save_debug_snapshot(payload)
 
@@ -727,11 +813,11 @@ def _trigger_and_collect(dataset_id: str, query: dict, input_list: list) -> tupl
             "Bright Data snapshotのレスポンス形式を解釈できませんでした"
             f"(型: {type(payload).__name__})。debug_snapshot.jsonを確認してください。"
         )
-        return False, []
+        return False, [], snapshot_id, "error"
 
     if structure == "dict.error":
         print(f"Bright Data snapshotがエラーレスポンスを返しました: {payload}")
-        return False, []
+        return False, [], snapshot_id, "error"
 
     fetched_count = len(raw_items)
     items = [item for item in raw_items if isinstance(item, dict)]
@@ -742,20 +828,37 @@ def _trigger_and_collect(dataset_id: str, query: dict, input_list: list) -> tupl
         f"取得件数: {fetched_count}件 / 解析件数: {parsed_count}件 / "
         f"解析失敗件数: {failed_count}件 / レスポンス構造: {structure}"
     )
-    return True, items
+    return True, items, snapshot_id, "ready"
 
 
-def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int) -> list:
+def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int) -> dict:
+    """
+    2026-07-18: 戻り値を list から dict に変更。
+      {
+        "posts": list[dict],
+        "snapshot_meta": list[dict],  # バッチごとのsnapshot追跡情報
+      }
+    snapshot_meta の各エントリ:
+      {
+        "batch_key": str,
+        "snapshot_id": str | None,
+        "bd_status": str,     # "ready"/"running"/"failed"/"trigger_failed"/"error"/"recovered"
+        "error_msg": str,
+        "accounts": list,
+        "recovered": bool,    # 前回pending→今回ready になった場合 True
+      }
+    """
     posts = []
+    snapshot_meta = []
 
     usernames = [_to_username(a) for a in accounts if a and a.strip()]
     if not usernames:
         print(f"{category}: 取得対象アカウントが0件です(競合発見の結果0件、または該当カテゴリで競合候補が見つかりませんでした)")
-        return posts
+        return {"posts": posts, "snapshot_meta": snapshot_meta}
 
     usernames = _apply_test_mode_limit(usernames, category)
     if not usernames:
-        return posts
+        return {"posts": posts, "snapshot_meta": snapshot_meta}
 
     # 直近RECENT_DAYS日より古いリールは取得時点で除外し、無駄な取得コストを減らす
     now = dt.datetime.now(dt.timezone.utc)
@@ -775,6 +878,11 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
         f"(1バッチ最大{ACCOUNTS_PER_BATCH}アカウント, 1アカウント最大{results_limit}件)"
     )
 
+    # 2026-07-18: 前回タイムアウトした未完了ジョブのsnapshot_idを読み込む。
+    # 同じバッチキーで重複ジョブを作らないための排他制御にも使う。
+    pending = _load_pending_snapshots()
+    updated_pending = dict(pending)  # 書き戻し用コピー
+
     failed_accounts = []
     fetch_start = time.monotonic()
 
@@ -791,6 +899,95 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             )
             break
 
+        # バッチキー: アカウント名ソート済み文字列で一意に識別
+        batch_key = "|".join(sorted(batch_usernames))
+
+        # 2026-07-18: 前回未完了のsnapshot_idがある場合は先に状態確認する
+        if batch_key in pending:
+            pending_info = pending[batch_key]
+            pending_sid = pending_info.get("snapshot_id")
+            print(
+                f"  [{category}] バッチ{batch_index}: 前回未完了snapshot_id={pending_sid}を確認中..."
+            )
+            status = _check_snapshot_status(pending_sid)
+            if status == "ready":
+                print(f"  [{category}] バッチ{batch_index}: snapshot準備完了(status=ready)。結果を取得します")
+                recovered_count = 0
+                try:
+                    snapshot_resp = _request_with_retry(
+                        "GET",
+                        f"{API_BASE}/datasets/v3/snapshot/{pending_sid}",
+                        params={"format": "json"},
+                        timeout=60,
+                    )
+                    payload = snapshot_resp.json()
+                    _save_debug_snapshot(payload)
+                    raw_items, structure = _extract_snapshot_items(payload)
+                    items = [item for item in raw_items if isinstance(item, dict)]
+                    recovered_count = len(items)
+                    print(f"  [{category}] バッチ{batch_index}: 未完了ジョブから{recovered_count}件取得しました")
+                    for item in raw_items:
+                        owner_username = _get_first(item, ["user_posted"], "") or ""
+                        posts.append(
+                            _normalize_post(item, source_account=owner_username, category=category)
+                        )
+                    del updated_pending[batch_key]
+                    snapshot_meta.append({
+                        "batch_key": batch_key,
+                        "snapshot_id": pending_sid,
+                        "bd_status": "recovered",
+                        "error_msg": "",
+                        "accounts": batch_usernames,
+                        "recovered": True,
+                        "recovered_count": recovered_count,
+                    })
+                except Exception as e:
+                    err = f"未完了ジョブの取得中にエラー: {e}"
+                    print(f"  [{category}] バッチ{batch_index}: {err}")
+                    snapshot_meta.append({
+                        "batch_key": batch_key,
+                        "snapshot_id": pending_sid,
+                        "bd_status": "error",
+                        "error_msg": err,
+                        "accounts": batch_usernames,
+                        "recovered": False,
+                    })
+                continue
+            elif status == "running":
+                msg = f"Bright Dataジョブはstatus=runningのまま待機時間を超過。結果未回収(snapshot_id={pending_sid})"
+                print(
+                    f"  [{category}] バッチ{batch_index}: まだ処理中(status=running)です。"
+                    f"このバッチはスキップして次回確認します(snapshot_id={pending_sid})"
+                )
+                failed_accounts.extend(batch_usernames)
+                snapshot_meta.append({
+                    "batch_key": batch_key,
+                    "snapshot_id": pending_sid,
+                    "bd_status": "running",
+                    "error_msg": msg,
+                    "accounts": batch_usernames,
+                    "recovered": False,
+                })
+                continue
+            elif status == "failed":
+                print(
+                    f"  [{category}] バッチ{batch_index}: Bright Data APIエラー（status=failed）。"
+                    f"snapshot_id={pending_sid}"
+                )
+                snapshot_meta.append({
+                    "batch_key": batch_key,
+                    "snapshot_id": pending_sid,
+                    "bd_status": "failed",
+                    "error_msg": "Bright Data APIエラー（status=failed）",
+                    "accounts": batch_usernames,
+                    "recovered": False,
+                })
+                del updated_pending[batch_key]
+                # fallthrough: 新規ジョブを作成する
+            else:
+                print(f"  [{category}] バッチ{batch_index}: 状態不明(status={status})。新規ジョブを作成します")
+                del updated_pending[batch_key]
+
         input_list = [
             {
                 "url": _to_profile_url(username),
@@ -806,22 +1003,87 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             f"{', '.join(batch_usernames)}"
         )
 
+        # 2026-07-18: trigger直後にsnapshot_idを即時永続化するコールバック。
+        # ポーリング中にプロセスがクラッシュしても snapshot_id を失わない。
+        def _on_snapshot_id(sid, _key=batch_key, _accts=batch_usernames):
+            updated_pending[_key] = {
+                "snapshot_id": sid,
+                "accounts": _accts,
+                "triggered_at": now.isoformat(),
+                "bd_status": "running",
+            }
+            _save_pending_snapshots(updated_pending)
+            print(f"  [{category}] snapshot_id={sid} を即時保存しました(pending_snapshots.json)")
+
         try:
-            ok, raw_items = _trigger_and_collect(REELS_DATASET_ID, REELS_DISCOVER_QUERY, input_list)
+            ok, raw_items, returned_sid, bd_status = _trigger_and_collect(
+                REELS_DATASET_ID, REELS_DISCOVER_QUERY, input_list,
+                on_snapshot_id=_on_snapshot_id,
+            )
         except Exception as e:
             # _trigger_and_collect内で例外は処理済みのはずだが、念のため
             # ここでも捕まえて、このバッチだけ失敗とし、全体は止めない。
-            print(f"  [{category}] バッチ{batch_index}で予期しないエラーが発生しました: {e}")
+            err = f"予期しないエラー: {e}"
+            print(f"  [{category}] バッチ{batch_index}で{err}")
             failed_accounts.extend(batch_usernames)
+            snapshot_meta.append({
+                "batch_key": batch_key,
+                "snapshot_id": None,
+                "bd_status": "error",
+                "error_msg": err,
+                "accounts": batch_usernames,
+                "recovered": False,
+            })
             continue
 
         if not ok:
-            print(
-                f"  [{category}] バッチ{batch_index}は失敗/タイムアウトしたためスキップします: "
-                f"{', '.join(batch_usernames)}"
-            )
+            # bd_statusに応じてエラーメッセージを分ける
+            if bd_status == "running":
+                error_msg = "Bright Dataジョブはstatus=runningのまま待機時間を超過。結果未回収"
+            elif bd_status == "failed":
+                error_msg = "Bright Data APIエラー（status=failed）"
+            else:
+                error_msg = f"Bright Data取得失敗（bd_status={bd_status}）"
+
+            # pending情報はon_snapshot_id経由で既に保存済み。
+            # on_snapshot_idが呼ばれなかった場合(trigger_failed)は returned_sid=None。
+            if returned_sid:
+                # pending に bd_status を更新
+                if batch_key in updated_pending:
+                    updated_pending[batch_key]["bd_status"] = bd_status
+                    updated_pending[batch_key]["error_msg"] = error_msg
+                print(
+                    f"  [{category}] バッチ{batch_index}: {error_msg}"
+                    f"(snapshot_id={returned_sid})"
+                )
+            else:
+                print(
+                    f"  [{category}] バッチ{batch_index}は失敗しました(snapshot_id取得不可): "
+                    f"{', '.join(batch_usernames)}"
+                )
+            snapshot_meta.append({
+                "batch_key": batch_key,
+                "snapshot_id": returned_sid,
+                "bd_status": bd_status,
+                "error_msg": error_msg,
+                "accounts": batch_usernames,
+                "recovered": False,
+            })
             failed_accounts.extend(batch_usernames)
             continue
+
+        # 成功時: pendingから削除
+        if batch_key in updated_pending:
+            del updated_pending[batch_key]
+
+        snapshot_meta.append({
+            "batch_key": batch_key,
+            "snapshot_id": returned_sid,
+            "bd_status": "ready",
+            "error_msg": "",
+            "accounts": batch_usernames,
+            "recovered": False,
+        })
 
         if not raw_items:
             print(
@@ -857,7 +1119,16 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             f"({len(failed_accounts)}件): {', '.join(failed_accounts)}"
         )
 
-    return posts
+    # 2026-07-18: 未完了ジョブ情報を書き戻す(変更があった場合のみ)
+    if updated_pending != pending:
+        _save_pending_snapshots(updated_pending)
+        if updated_pending:
+            print(
+                f"未完了ジョブ {len(updated_pending)}件をpending_snapshots.jsonに保存しました。"
+                f"次回実行時に自動再確認します"
+            )
+
+    return {"posts": posts, "snapshot_meta": snapshot_meta}
 
 
 def _attach_account_post_counts(posts: list) -> None:
@@ -886,17 +1157,21 @@ def _attach_account_post_counts(posts: list) -> None:
 
 def fetch_trend_posts(
     accounts: list, results_limit: int = DEFAULT_RESULTS_PER_ACCOUNT
-) -> list:
+) -> dict:
     """
     accounts: accounts.py の ANTENNA_ACCOUNTS(ジャンル不問のアンテナアカウント)。
 
+    2026-07-18: 戻り値を list から dict に変更。
+      {"posts": list, "snapshot_meta": list}
+
     取得結果は全件category=CATEGORY_ALLになる。①Instagram全体トレンド+
-    ②美容ジャンルトレンドの2カテゴリに分けたい場合は、戻り値に対して
+    ②美容ジャンルトレンドの2カテゴリに分けたい場合は、戻り値["posts"]に対して
     apply_beauty_category()を呼ぶこと(main.py参照。2026-07-02)。
     """
-    posts = _fetch_posts_for_accounts(accounts, CATEGORY_ALL, results_limit)
+    fetch_result = _fetch_posts_for_accounts(accounts, CATEGORY_ALL, results_limit)
+    posts = fetch_result["posts"]
     _attach_account_post_counts(posts)
-    return posts
+    return {"posts": posts, "snapshot_meta": fetch_result["snapshot_meta"]}
 
 
 def apply_beauty_category(posts: list, beauty_usernames) -> list:
@@ -952,12 +1227,46 @@ def dedupe_by_url(posts: list) -> list:
     return list(best_by_key.values())
 
 
+_PR_KEYWORDS = ("PR", "提供", "案件", "タイアップ", "広告", "ギフテッド", "gifted", "sponsored")
+
+
+def _is_pr_post(post: dict) -> bool:
+    """キャプションまたはハッシュタグにPR関連キーワードが含まれているか判定する。"""
+    caption = (post.get("caption") or "").lower()
+    # hashtags リストは "#" なしの文字列で格納されている
+    hashtags_lower = {h.lower().lstrip("#") for h in (post.get("hashtags") or [])}
+
+    # ハッシュタグリストに "pr" が含まれていれば即PR判定
+    if "pr" in hashtags_lower or "広告" in hashtags_lower:
+        return True
+
+    # キャプション内の "#pr" / "【pr】" パターン
+    if "#pr" in caption or "【pr】" in caption or "[pr]" in caption:
+        return True
+    if "#広告" in caption or "【広告】" in caption:
+        return True
+
+    # 「提供」「案件」「タイアップ」「ギフテッド」はキャプション・ハッシュタグに含まれていれば除外
+    soft_keywords = ("提供", "案件", "タイアップ", "ギフテッド", "gifted", "sponsored")
+    for kw in soft_keywords:
+        kw_lower = kw.lower()
+        if kw_lower in caption:
+            return True
+        if kw_lower in hashtags_lower:
+            return True
+
+    return False
+
+
 def _classify_pool_exclusion(post: dict, cutoff) -> tuple:
     """
     投稿が「構造的に分析対象として成立するデータかどうか」だけを判定する。
     再生数・再生倍率・フォロワー数の有無による判断はここでは行わない
     (trend_score.pyの連続スコアに委ねる。本ファイル末尾の【2026-06-30】
     セクション参照)。
+
+    【2026-07-20】PR投稿フィルタを追加。#PR・提供・案件・タイアップ・広告等の
+    キーワードを含む投稿は除外する（除外理由: "PR投稿"）。
 
     戻り値: (stats_key, human_reason)。stats_keyが""なら除外なし(プール入り)。
     human_reasonはraw_fetch_logシートの「除外理由」列にそのまま使う文言。
@@ -975,6 +1284,9 @@ def _classify_pool_exclusion(post: dict, cutoff) -> tuple:
     if posted_at_dt < cutoff:
         days_old = int((dt.datetime.now(dt.timezone.utc) - posted_at_dt).total_seconds() // 86400)
         return "excluded_date", f"投稿日が古い(約{days_old}日前、直近{RECENT_DAYS}日より前)"
+
+    if _is_pr_post(post):
+        return "excluded_pr", "PR投稿"
 
     return "", ""
 
@@ -1011,6 +1323,8 @@ def build_post_pool(posts: list) -> dict:
         "excluded_fetch_error": 0,
         "excluded_not_reel": 0,
         "excluded_date": 0,
+        "excluded_pr": 0,
+        "excluded_product_reviewer": 0,
         "no_followers_count": 0,
         "pool_count": 0,
     }
@@ -1042,6 +1356,28 @@ def build_post_pool(posts: list) -> dict:
             stats["no_followers_count"] += 1
 
         pool.append(post)
+
+    # 商品レビュー主体アカウントを除外
+    # 同一アカウントがPR除外された投稿を2件以上持つ場合、そのアカウントのpool内投稿も除外
+    pr_excluded_by_account: dict[str, int] = {}
+    for post in posts:
+        if post.get("pool_exclusion_reason") == "PR投稿":
+            acct = (post.get("username") or post.get("source_account") or "").strip().lower()
+            if acct:
+                pr_excluded_by_account[acct] = pr_excluded_by_account.get(acct, 0) + 1
+
+    product_reviewer_accounts = {acct for acct, cnt in pr_excluded_by_account.items() if cnt >= 2}
+
+    if product_reviewer_accounts:
+        filtered_pool = []
+        for post in pool:
+            acct = (post.get("username") or post.get("source_account") or "").strip().lower()
+            if acct in product_reviewer_accounts:
+                post["pool_exclusion_reason"] = "商品レビュー主体"
+                stats["excluded_product_reviewer"] += 1
+            else:
+                filtered_pool.append(post)
+        pool = filtered_pool
 
     pool = dedupe_by_url(pool)
     stats["pool_count"] = len(pool)
