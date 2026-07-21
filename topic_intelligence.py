@@ -280,7 +280,7 @@ def generate_topic_candidates(
 
     try:
         from openai_analyzer import generate_topic_candidates_ai
-        return generate_topic_candidates_ai(
+        candidates = generate_topic_candidates_ai(
             world_ctx=world_ctx,
             observations=obs,
             vertical_name=vertical_name,
@@ -293,6 +293,39 @@ def generate_topic_candidates(
     except Exception as e:
         print(f"  ⚠️ Hook候補生成失敗: {e}")
         return []
+
+    # ── Hook品質ゲート ────────────────────────────────────────────────────────
+    # score_hook_quality() でスコアを付与し、gates通過状況をログへ出す
+    # 1位候補が品質ゲートを通らない場合は通過候補を先頭へ移動する
+    content_history = load_content_history(days=30)
+    scored: list[dict] = []
+    for c in candidates:
+        quality = score_hook_quality(c)
+        diversity = check_theme_diversity(c, content_history)
+        c["_quality"] = quality
+        c["_diversity"] = diversity
+        scored.append(c)
+
+    # 通過リストと不通過リストに分ける
+    passed = [c for c in scored if c["_quality"]["passes_quality_gate"]
+              and not c["_diversity"]["too_similar"]]
+    failed_gate = [c for c in scored if not c["_quality"]["passes_quality_gate"]
+                   or c["_diversity"]["too_similar"]]
+
+    if failed_gate:
+        for c in failed_gate:
+            reason = c["_quality"].get("gate_failure_reason", "")
+            div_reason = "過去30日と類似" if c["_diversity"]["too_similar"] else ""
+            issue = " / ".join(filter(None, [reason, div_reason]))
+            print(f"  [Hook品質ゲート] NG: 「{c.get('hook','')[:25]}」 → {issue}")
+
+    # 通過候補を先頭、不通過を後尾に並べ直す
+    reordered = passed + failed_gate
+    # stars の振り直し（1位=5, 2位=4, 3位=3）
+    for i, c in enumerate(reordered):
+        c["stars"] = max(5 - i, 1)
+
+    return reordered
 
 
 # ── Hook選択後のリアリティ追加 ───────────────────────────────────────────────

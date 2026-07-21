@@ -66,8 +66,35 @@ def gather_evidence(
 
         keyword = _extract_keyword(c)
 
+        # Topic と関連するキーワードリストを作成（意味的フィルタ用）
+        topic_keywords: list[str] = []
+        for field in ("perspective", "theme", "hook", "angle"):
+            val = c.get(field, "") or ""
+            if val:
+                topic_keywords.append(val)
+
         # Instagram 証拠（今回0件の場合は強制的に空リスト）
-        ig_hits = _search_reels_sheet(reels_rows, keyword)
+        ig_hits_raw = _search_reels_sheet(reels_rows, keyword)
+
+        # 意味的関連フィルタ: Topic と無関係な投稿（AI・針美容液・スキンケア等）を除外
+        # relevance_score 60未満は採用しない、有効件数だけ表示（最大5件を無理に埋めない）
+        ig_hits = filter_ig_hits_by_relevance(ig_hits_raw, topic_keywords)
+        filtered_out = len(ig_hits_raw) - len(ig_hits)
+        if filtered_out > 0:
+            print(
+                f"  [関連性フィルタ] {keyword}: {len(ig_hits_raw)}件中{filtered_out}件を除外"
+                f" → 有効{len(ig_hits)}件"
+            )
+        if len(ig_hits) < 3 and len(ig_hits) > 0:
+            print(
+                f"  [Instagram根拠不足] {keyword}: 有効参考{len(ig_hits)}件のみ"
+                f"（3件未満 — 無理に埋めません）"
+            )
+        elif len(ig_hits) == 0 and len(ig_hits_raw) > 0:
+            print(
+                f"  [Instagram根拠なし] {keyword}: 全{len(ig_hits_raw)}件がTopicと無関係のため除外"
+            )
+
         # 過去実績
         own_hits = _search_hook_library(hook_lib_rows, keyword)
         # 季節性
@@ -76,9 +103,9 @@ def gather_evidence(
         level, level_reason = _assign_level(ig_hits, own_hits, seasonal,
                                             ig_zero_today=ig_zero_today)
 
-        # 参考URL（最大3件）
-        ref_urls = [h["url"] for h in ig_hits[:3]]
-        ref_dates = [h.get("date", "") for h in ig_hits[:3]]
+        # 参考URL（有効件数のみ・最大5件まで、無理に埋めない）
+        ref_urls = [h["url"] for h in ig_hits]
+        ref_dates = [h.get("date", "") for h in ig_hits]
 
         # 各媒体の証拠テキスト
         ig_evidence = _format_ig_evidence(ig_hits)
@@ -275,41 +302,85 @@ def _has_valid_instagram_evidence(ig_hits: list[dict], min_count: int = 3) -> bo
     return has_views
 
 
+# 無関係ジャンルキーワード（CORE HARIのTopicと無関係な美容一般コンテンツ）
+_IRRELEVANT_KEYWORDS = [
+    "AI", "人工知能", "ChatGPT", "針美容液", "美容液", "スキンケア", "美白", "美肌",
+    "SPF", "UVケア", "日焼け止め", "サプリメント", "ダイエット", "痩身", "ファッション",
+    "コーデ", "メイク", "リップ", "アイシャドウ", "ファンデ", "ネイル", "料理", "レシピ",
+    "インテリア", "旅行", "ヘアカラー", "まつ毛", "脱毛", "ボトックス", "フィラー",
+]
+
+# CORE HARI専門分野キーワード（これらが含まれると relevance_score が上がる）
+_CORE_HARI_DOMAIN_KEYWORDS = [
+    "咬筋", "顎", "舌", "舌骨", "首", "胸郭", "頭皮", "表情筋", "顔筋",
+    "呼吸", "姿勢", "骨盤", "肋骨", "後頭部", "噛み癖", "食いしばり",
+    "左右差", "むくみ", "たるみ", "小顔", "顔の歪み", "筋膜", "リンパ",
+    "エステ", "矯正", "施術", "顔専門", "フェイシャル",
+]
+
+# 意味的関連スコアの最低ライン（これ未満は参考表示しない）
+_MIN_RELEVANCE_SCORE = 60
+
+
+def _compute_relevance_score(hit: dict, topic_keywords: list[str]) -> int:
+    """
+    投稿とTopicの意味的関連スコアを 0〜100 で返す。
+
+    採点方法:
+      - 無関係ジャンルキーワードが含まれる → 即0点
+      - topic_keywords との一致ごとに +30点（上限60点）
+      - CORE HARI専門ドメイン語との一致ごとに +20点（上限40点）
+    """
+    cap       = (hit.get("caption", "") or hit.get("caption_snippet", "") or "").lower()
+    title     = (hit.get("title", "") or "").lower()
+    url       = (hit.get("url", "") or "").lower()
+    combined  = f"{cap} {title} {url}"
+
+    # 無関係ジャンル → 即0点
+    if any(irr.lower() in combined for irr in _IRRELEVANT_KEYWORDS):
+        return 0
+
+    score = 0
+
+    # Topic キーワードとの一致
+    for kw in topic_keywords:
+        if kw and kw.lower() in combined:
+            score += 30
+    score = min(score, 60)
+
+    # CORE HARI 専門ドメイン語との一致
+    for domain_kw in _CORE_HARI_DOMAIN_KEYWORDS:
+        if domain_kw.lower() in combined:
+            score += 20
+            break  # 1件見つかれば加点は1回のみ
+    score = min(score, 100)
+
+    return score
+
+
 def filter_ig_hits_by_relevance(
     ig_hits: list[dict],
     topic_keywords: list[str],
+    min_score: int = _MIN_RELEVANCE_SCORE,
 ) -> list[dict]:
     """
-    参考Instagram投稿のうち、topicと関連性が低いものを除外する。
+    参考Instagram投稿のうち、topicとの意味的関連スコアが min_score 未満のものを除外する。
 
     topic_keywords: テーマを表すキーワードリスト（例: ["咬筋", "左右差"]）
-    判定: キャプション or タイトルに1つ以上含まれるものを「関連あり」とする。
-    無関連の投稿は参考根拠から除外する。
+    min_score: この値未満は参考根拠に採用しない（デフォルト60）
+    有効件数だけ返す（最大5件を無理に埋めない）。
     """
     if not topic_keywords:
         return ig_hits
 
-    # 無関係ジャンルキーワード（美容一般の無関係例）
-    _IRRELEVANT_KEYWORDS = [
-        "AI", "人工知能", "針美容液", "スキンケア", "美白", "SPF", "UV", "日焼け止め",
-        "サプリメント", "ダイエット", "痩身", "ファッション", "コーデ", "メイク", "リップ",
-        "アイシャドウ", "ネイル", "料理", "レシピ", "インテリア",
-    ]
-
     relevant = []
     for hit in ig_hits:
-        cap = (hit.get("caption", "") or "").lower()
-        title = (hit.get("title", "") or "").lower()
-        combined = cap + " " + title
+        score = _compute_relevance_score(hit, topic_keywords)
+        if score >= min_score:
+            relevant.append({**hit, "relevance_score": score})
 
-        # 無関係ジャンル除外
-        if any(irr.lower() in combined for irr in _IRRELEVANT_KEYWORDS):
-            continue
-
-        # topic_keywords との一致チェック
-        if any(kw.lower() in combined for kw in topic_keywords):
-            relevant.append(hit)
-
+    # 関連スコア降順でソート
+    relevant.sort(key=lambda h: h.get("relevance_score", 0), reverse=True)
     return relevant
 
 

@@ -1214,13 +1214,20 @@ def generate_topic_candidates_ai(
 
     hook_lib_text = f"{hook_library_text}\n\n" if hook_library_text else ""
 
+    # World Context を事実/仮説/季節観察に分類して安全なテキストを生成
+    try:
+        from world_context import safe_world_context_text
+        _safe_wc = safe_world_context_text(world_ctx)
+    except Exception:
+        _safe_wc = f"季節: {season}（{month_ctx}）\n今の関心事: {hot}"
+
     prompt = (
         f"専門家: {vertical_name}（オーナー: 森このみ）\n"
         f"{region_line}"
-        f"今日の季節: {season}（{month_ctx}）\n"
-        f"今の最大関心事: {hot}\n"
-        f"ブランド関連の環境情報:\n{brand_ctx[:300] if brand_ctx else '（なし）'}\n"
+        f"\n{_safe_wc}\n"
         f"30〜40代女性の今の気分: {audience[:100] if audience else '（なし）'}\n\n"
+        f"【重要】World Contextの仮説・季節観察は断定として使わないこと。\n"
+        f"「〜が原因です」「〜になります」禁止。「〜の傾向があります」「〜が相談テーマになりやすい」等で表現。\n\n"
         f"{brand_line}"
         f"{off_brand_line}"
         f"{hook_lib_text}"
@@ -1241,6 +1248,15 @@ def generate_topic_candidates_ai(
         "  Step2. Expert Angle を決める:\n"
         "         「CORE HARIなら何を見るか」でCORE HARI視点を1つ選ぶ。\n"
         "         ← この視点がHookの核。視点を決めてからHookを作る。\n\n"
+        "         【Expert Angle 接続ルール — 必ず守る】\n"
+        "         TopicからExpert Angleへの接続は、観察事実や生理学的な順序で説明できるものだけ選ぶ。\n"
+        "         『飛びすぎ』は禁止: 「冷房 → 咬筋」のような1ステップで説明できない接続はNG。\n"
+        "         正しい接続例:\n"
+        "           冷房 → 口呼吸 → 舌の位置 → 舌骨の緊張 → 首・胸郭の固さ → 顔の印象変化\n"
+        "           横向き寝 → 顔の左右差 → 咬筋の非対称 → 顎関節の負荷\n"
+        "           食いしばり → 咬筋 → 側頭筋 → 頭皮の緊張\n"
+        "         接続に「なぜ？」と問われたとき観察事実で答えられなければ選ばない。\n"
+        "         接続ステップは必ず perspective フィールドに「A → B → C」形式で記録する。\n\n"
         "  Step3. 切り口を選ぶ（優先: 意外性・ギャップ・勘違い・共通点 > その他）:\n"
         "         意外性/ギャップ/勘違い/共通点/NG行動/チェック/比較/〜な人へ/先にして/専門家視点\n\n"
         "  Step4. Expert Angle × 切り口 → Hook文を作る\n\n"

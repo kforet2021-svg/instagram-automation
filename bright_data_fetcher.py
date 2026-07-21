@@ -1838,11 +1838,17 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             del remaining_jobs[bkey]
 
         # 完了したスロット分だけキューから次のバッチをtrigger
-        while trigger_queue and len(running_jobs) < BRIGHT_DATA_MAX_CONCURRENT:
+        # ※ running_jobs は増えるだけのリスト。実際の稼働数は remaining_jobs で数える。
+        while trigger_queue and len(remaining_jobs) < BRIGHT_DATA_MAX_CONCURRENT:
             idx = trigger_queue.pop(0)
             if _trigger_one_batch(idx):
                 bkey_new = "|".join(sorted(batches[idx]))
                 remaining_jobs[bkey_new] = running_jobs[bkey_new]
+                print(
+                    f"  [キュー] スロット空き → バッチ{idx+1}/{len(batches)} trigger"
+                    f" ({len(remaining_jobs)}/{BRIGHT_DATA_MAX_CONCURRENT}稼働中,"
+                    f" キュー残{len(trigger_queue)}件)"
+                )
 
         if remaining_jobs or trigger_queue:
             elapsed = time.monotonic() - fetch_start
