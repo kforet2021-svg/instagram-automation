@@ -1323,36 +1323,102 @@ def generate_topic_candidates_ai(
 
 
 
-def review_post_as_editor(content: str, model: str = "gpt-4o-mini") -> str:
+def review_post_as_editor(
+    content: str,
+    model: str = "gpt-4o-mini",
+    post_status: str = "",
+) -> str:
     """
-    Instagram編集長として投稿がCORE HARIらしいかを1回のAPIコールで判定する。
+    Instagram編集長として完成版Markdown全文を入力に受け取りレビューする。
 
-    Returns: 表示用テキスト（YES/NO + 理由 + 改善案1つ）。失敗時は空文字。
+    判定は APPROVED / REVISION_REQUIRED / REJECTED の3種のみ。
+    投稿ステータス（post_status）と整合させる:
+      - post_status が「要修正」なら APPROVED は返さない。
+      - content が 300文字未満なら即 REJECTED（API呼び出しなし）。
+
+    Returns: 表示用テキスト。失敗時は空文字。
     """
+    char_len = len(content.strip())
+
+    # ── 文字数チェック（API呼び出し前） ────────────────────────────
+    if char_len < 300:
+        return (
+            f"判定: REJECTED\n"
+            f"理由: [生成量不足] 生成本文が{char_len}文字（最低300文字必要）。\n"
+            f"      投稿本文が正常に生成されていません。再実行してください。\n"
+            f"改善アクション:\n"
+            f"  1. OpenAI APIの応答を確認する\n"
+            f"  2. プロンプトを短くして再試行する\n"
+            f"引用: なし（本文が存在しないためレビュー不可）"
+        )
+
     instructions = (
         "あなたはInstagram編集長です。\n"
-        "CORE HARI FACEは札幌の顔専門エステサロンです。"
+        "CORE HARI FACEは札幌の顔専門エステサロン。"
         "小顔矯正・顔筋トレーニング・たるみ改善を専門とし、"
         "施術者が顔を見ながら気づいたことをそのまま伝えるアカウントです。\n\n"
-        "この投稿はCORE HARIらしいですか？\n"
-        "YESまたはNOで答えてください。理由は100文字以内。\n"
-        "改善があるなら1つだけ提案してください。\n\n"
-        "形式:\n"
-        "判定: YES / NO\n"
-        "理由: （100文字以内）\n"
-        "改善提案: （あれば1文、なければ「なし」）"
+        "以下の投稿Markdownを全文読み、レビューしてください。\n\n"
+        "【絶対に守るルール】\n"
+        "1. 判定は APPROVED / REVISION_REQUIRED / REJECTED の3種のみ。\n"
+        "2. 投稿本文に存在しない内容（ビフォーアフター写真・施術内容・実績・体験談）\n"
+        "   が本文に書かれていない場合は、それを改善提案に出してはいけない。\n"
+        "3. 根拠として必ず本文から1〜3箇所を引用し「引用:「○○○」→ だから△△と判断」の形で示す。\n"
+        "4. 投稿ステータスが「要修正」の場合は APPROVED を返してはいけない。\n"
+        "5. 改善アクションは「もっと具体的に」は禁止。修正対象を1件ずつ示す。\n"
+        "   例: ・咬筋とむくみの因果表現を弱める\n"
+        "       ・Realityが空なので実例を1件追加\n"
+        "       ・Evidence Registry IDを本文に追加\n\n"
+        "【出力形式（この形式厳守）】\n"
+        "判定: APPROVED / REVISION_REQUIRED / REJECTED\n"
+        "REVIEW_REASON:\n"
+        "  ・（原因カテゴリ）: （具体的な理由）\n"
+        "  ※ Claims Check / Evidence不足 / Reality不足 / Expert Angle不足 / その他 から選ぶ\n"
+        "引用:\n"
+        "  1. 「（本文からの引用1）」→ だから（判断理由）\n"
+        "  2. 「（本文からの引用2）」→ だから（判断理由）\n"
+        "改善アクション:\n"
+        "  1. （修正対象と具体的な修正内容）\n"
+        "  2. （修正対象と具体的な修正内容）\n"
+        "  ※ APPROVEDの場合はここに「なし」と書く"
     )
+
+    # 投稿ステータスを先頭に付与してモデルに伝える
+    status_note = ""
+    if post_status == "要修正":
+        status_note = (
+            "【重要】この投稿は投稿ステータス「要修正」です。\n"
+            "APPROVEDを返すことは禁止されています。\n\n"
+        )
+    elif post_status == "生成失敗":
+        return (
+            "判定: REJECTED\n"
+            "REVIEW_REASON:\n"
+            "  ・生成失敗: 投稿本文が正常に生成されませんでした\n"
+            "引用: なし（本文が存在しないためレビュー不可）\n"
+            "改善アクション:\n"
+            "  1. 再実行してください"
+        )
+
     try:
         from openai import OpenAI
         from config import OPENAI_API_KEY
         client = OpenAI(api_key=OPENAI_API_KEY)
-        # 長すぎる場合は先頭2000文字に絞る
-        excerpt = content[:2000]
+        excerpt = status_note + content[:3000]
         resp = client.responses.create(
             model=model,
             instructions=instructions,
             input=excerpt,
         )
-        return (resp.output_text or "").strip()
+        review_text = (resp.output_text or "").strip()
+
+        # ── 整合性チェック: 要修正なのにAPPROVEDが返った場合は強制上書き ──
+        if post_status == "要修正" and review_text.startswith("判定: APPROVED"):
+            review_text = review_text.replace(
+                "判定: APPROVED",
+                "判定: REVISION_REQUIRED\n【自動修正】投稿ステータスが要修正のためAPPROVEDをREVISION_REQUIREDに変更",
+                1,
+            )
+
+        return review_text
     except Exception as e:
         return f"（編集長レビュー取得失敗: {str(e)[:60]}）"

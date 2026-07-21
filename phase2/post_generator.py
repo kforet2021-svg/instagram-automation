@@ -1011,6 +1011,7 @@ def generate_post(handoff: dict, dry_run: bool = False) -> Optional[dict]:
     print(SEP)
 
     content = ""
+    out_tok = 0
     try:
         print("  [API] 生成中...")
         content, in_tok, out_tok = _call_api(prompt, OPENAI_MODEL)
@@ -1020,6 +1021,22 @@ def generate_post(handoff: dict, dry_run: bool = False) -> Optional[dict]:
         _user_friendly_error(e, base_dir)
         _play_sound(success=False)
         return None
+
+    # ── 生成量チェック（出力トークンが少なすぎる場合は生成失敗） ───────
+    _CHAR_LEN = len(content.strip())
+    _MIN_OUTPUT_TOKENS = 50   # これ未満は生成失敗とみなす
+    _MIN_CONTENT_CHARS = 300  # 300文字未満は内容不足
+    print(f"  [生成確認] generated_post_length: {_CHAR_LEN}文字 / {out_tok}トークン")
+    if out_tok < _MIN_OUTPUT_TOKENS or _CHAR_LEN < _MIN_CONTENT_CHARS:
+        reason = (
+            f"出力トークン数が{out_tok}tok（最低{_MIN_OUTPUT_TOKENS}tok必要）"
+            if out_tok < _MIN_OUTPUT_TOKENS
+            else f"生成本文が{_CHAR_LEN}文字（最低{_MIN_CONTENT_CHARS}文字必要）"
+        )
+        print(f"  ❌ 生成失敗 — {reason}")
+        print(f"  レビューをスキップします。再実行してください。")
+        _play_sound(success=False)
+        return {"content": content, "status": "生成失敗", "paths": {}}
 
     # ── 投稿OK / 要修正 判定 ──────────────────────────────────────────
     validation = validate_output(content)
@@ -1108,10 +1125,13 @@ def generate_post(handoff: dict, dry_run: bool = False) -> Optional[dict]:
 
     # ── Instagram編集長レビュー（1回のAPIコール）─────────────────────
     editor_review = ""
+    print(f"  [編集長レビュー] generated_post_length: {len(content.strip())}文字 / {out_tok}トークン")
     print("  [編集長レビュー] 確認中...")
     try:
         from openai_analyzer import review_post_as_editor
-        editor_review = review_post_as_editor(content, model=OPENAI_MODEL)
+        editor_review = review_post_as_editor(
+            content, model=OPENAI_MODEL, post_status=status
+        )
     except Exception as e:
         editor_review = f"（レビュー取得失敗: {str(e)[:50]}）"
 
