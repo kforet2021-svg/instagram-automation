@@ -223,6 +223,79 @@ def print_world_context(ctx: dict) -> None:
     print()
 
 
+def classify_world_context_claims(world_ctx: dict) -> dict:
+    """
+    World Context の各要素を根拠強度で分類する。
+
+    factual            : 日付・暦・気象統計から確実に言える事実
+    seasonal_observation: 季節的な傾向観察（断定を避ける）
+    content_hypothesis : コンテンツ角度の仮説（科学的根拠なし）
+
+    投稿生成時に hypothesis を断定表現で使わないためのガード。
+    """
+    season      = world_ctx.get("season", "")
+    hot         = world_ctx.get("hot_tension", "")
+    month_ctx   = world_ctx.get("month_context", "")
+    brand_ctx   = world_ctx.get("brand_relevant_context", "") or ""
+    social      = world_ctx.get("social_trends", "") or ""
+
+    # 危険な断定パターン（投稿に使うと誤解を招く）
+    _CAUSAL_DANGER_PATTERNS = [
+        "引き起こす", "原因になる", "なってしまう", "悪化する",
+        "高まる", "強くなる", "増える", "乾燥が影響",
+        "むくみが出る", "たるみが出る",
+    ]
+
+    def _has_causal_danger(text: str) -> bool:
+        return any(p in text for p in _CAUSAL_DANGER_PATTERNS)
+
+    classified = {
+        "factual": [],
+        "seasonal_observation": [],
+        "content_hypothesis": [],
+    }
+
+    # 月・季節は factual（カレンダー由来）
+    if season:
+        classified["factual"].append(f"季節: {season}")
+    if month_ctx:
+        classified["factual"].append(f"月次文脈: {month_ctx}")
+
+    # hot_tension / brand_ctx は分類が必要
+    for label, text in [("hot_tension", hot), ("brand_ctx", brand_ctx), ("social", social)]:
+        if not text:
+            continue
+        if _has_causal_danger(text):
+            classified["content_hypothesis"].append(f"{label}: {text[:80]}")
+        elif any(w in text for w in ["季節", "時期", "多い", "増えやすい", "感じやすい"]):
+            classified["seasonal_observation"].append(f"{label}: {text[:80]}")
+        else:
+            classified["seasonal_observation"].append(f"{label}: {text[:80]}")
+
+    classified["_safe_to_assert"] = classified["factual"]
+    classified["_hypothesis_only"] = classified["content_hypothesis"]
+    return classified
+
+
+def safe_world_context_text(world_ctx: dict) -> str:
+    """
+    投稿生成プロンプトに渡す、断定を避けたWorld Context テキストを返す。
+    仮説的表現を「〜の傾向がある」「〜が相談テーマになりやすい」等に変換する。
+    """
+    classified = classify_world_context_claims(world_ctx)
+    lines = []
+    if classified["factual"]:
+        lines.append("【確実な背景情報】")
+        lines.extend(f"  ・{f}" for f in classified["factual"])
+    if classified["seasonal_observation"]:
+        lines.append("【季節的な傾向観察（断定せず参照）】")
+        lines.extend(f"  ・{f}" for f in classified["seasonal_observation"])
+    if classified["content_hypothesis"]:
+        lines.append("【コンテンツ仮説（投稿では「可能性があります」等で表現）】")
+        lines.extend(f"  ・{f}" for f in classified["content_hypothesis"])
+    return "\n".join(lines)
+
+
 def derive_audience_psychology(world_context: dict, vertical_name: str = "専門家") -> dict:
     """
     World Context から Audience Psychology を導出する（AIコストゼロ）。

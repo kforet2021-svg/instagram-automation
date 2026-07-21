@@ -23,3 +23,7 @@ reports/
 
 # chatgpt prompt outputs
 outputs/
+
+# runtime state (実行状態ファイル)
+runtime_state/
+*.migrated

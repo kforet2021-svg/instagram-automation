@@ -162,10 +162,12 @@ DEBUG_SNAPSHOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "
 # 2026-07-18: タイムアウトした未完了ジョブのsnapshot_idを保存するファイル。
 # タイムアウト時はsnapshot_idをここに書き込み、次回実行時に状態を再確認する。
 # 同一バッチキーで重複ジョブを作らないための排他制御にも使う。
-PENDING_SNAPSHOTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pending_snapshots.json")
-ACCOUNT_ROTATION_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "runtime_state", "account_rotation.json"
-)
+# runtime_state/pending_snapshots.json（旧: ルートのpending_snapshots.json から移行）
+RUNTIME_STATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime_state")
+PENDING_SNAPSHOTS_PATH = os.path.join(RUNTIME_STATE_DIR, "pending_snapshots.json")
+_LEGACY_PENDING_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pending_snapshots.json")
+ACCOUNT_HEALTH_PATH = os.path.join(RUNTIME_STATE_DIR, "account_health.json")
+ACCOUNT_ROTATION_PATH = os.path.join(RUNTIME_STATE_DIR, "account_rotation.json")
 
 # Reels - Discover by URL 用のdataset_id。
 # 公式ドキュメントで「Discover by URL用には必ずこの値を使うこと」と
@@ -184,6 +186,8 @@ REELS_DISCOVER_QUERY = {"type": "discover_new", "discover_by": "url"}
 # 2アカウント/バッチ に下げると1ジョブの作業量が減り、proxy error も連鎖しにくくなる。
 # main.py から --batch-size 2 オプションで上書き可能。
 ACCOUNTS_PER_BATCH = 2  # 2026-07-20: 5→2に変更。proxy error によるrunning長期化対策。
+# 同時実行するBright Dataジョブの最大数（環境変数で上書き可能）
+BRIGHT_DATA_MAX_CONCURRENT = int(os.environ.get("BRIGHT_DATA_MAX_CONCURRENT", "3"))
 DEFAULT_RESULTS_PER_ACCOUNT = 8  # 1アカウントあたり取得する最新投稿数(5〜10件)
 
 # --- ポーリング設定 ---
@@ -756,14 +760,32 @@ SNAPSHOT_LIST_KEYS = ["data", "items", "results", "snapshot", "result", "rows"]
 
 def _load_pending_snapshots() -> dict:
     """
-    pending_snapshots.jsonから未完了ジョブ情報を読み込む。
-    形式: {batch_key: {"snapshot_id": str, "accounts": list, "triggered_at": str}}
+    runtime_state/pending_snapshots.json を読み込む。
+    旧ルートのpending_snapshots.jsonが存在すれば自動移行する。
     ファイルが無い・読み込めない場合は空dictを返す。
     """
+    os.makedirs(RUNTIME_STATE_DIR, exist_ok=True)
+
+    # 旧ファイルからの自動移行
+    if not os.path.exists(PENDING_SNAPSHOTS_PATH) and os.path.exists(_LEGACY_PENDING_PATH):
+        try:
+            with open(_LEGACY_PENDING_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _save_pending_snapshots(data)
+            os.rename(_LEGACY_PENDING_PATH, _LEGACY_PENDING_PATH + ".migrated")
+            print(f"[pending移行] ルートのpending_snapshots.json → runtime_state/ へ移行しました")
+            return data
+        except Exception as e:
+            print(f"[pending移行] 移行失敗（続行）: {e}")
+
     try:
         if os.path.exists(PENDING_SNAPSHOTS_PATH):
             with open(PENDING_SNAPSHOTS_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                raw = json.load(f)
+            # 後方互換: 旧形式（snapshot_id が直接値のフラット形式）を変換
+            if raw and isinstance(next(iter(raw.values()), None), str):
+                raw = {k: {"snapshot_id": v, "accounts": [], "triggered_at": ""} for k, v in raw.items()}
+            return raw
     except Exception as e:
         print(f"pending_snapshots.jsonの読み込みに失敗しました(本処理には影響しません): {e}")
     return {}
@@ -863,14 +885,62 @@ def _print_pending_health(pending: dict) -> None:
 
 def _save_pending_snapshots(snapshots: dict) -> None:
     """
-    未完了ジョブ情報をpending_snapshots.jsonに保存する。
-    空dictを渡すとファイルは残るがエントリが消える。
+    未完了ジョブ情報を runtime_state/pending_snapshots.json に保存する。
+    一時ファイル→atomicリネームで破損防止。
     """
+    os.makedirs(RUNTIME_STATE_DIR, exist_ok=True)
+    tmp_path = PENDING_SNAPSHOTS_PATH + ".tmp"
     try:
-        with open(PENDING_SNAPSHOTS_PATH, "w", encoding="utf-8") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(snapshots, f, ensure_ascii=False, indent=2, default=str)
+        os.replace(tmp_path, PENDING_SNAPSHOTS_PATH)
     except Exception as e:
         print(f"pending_snapshots.jsonへの保存に失敗しました(本処理には影響しません): {e}")
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+
+def _load_account_health() -> dict:
+    """runtime_state/account_health.json を読み込む。"""
+    try:
+        if os.path.exists(ACCOUNT_HEALTH_PATH):
+            with open(ACCOUNT_HEALTH_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+
+def _update_account_health(account: str, success: bool, error_type: str = "") -> None:
+    """
+    アカウントごとの健全性情報を更新する。
+    連続失敗回数が3回以上になったら「要確認」フラグを立てる。
+    自動削除はしない。
+    """
+    os.makedirs(RUNTIME_STATE_DIR, exist_ok=True)
+    health = _load_account_health()
+    entry = health.get(account, {"consecutive_failures": 0, "last_error": "", "needs_review": False, "last_updated": ""})
+
+    if success:
+        entry["consecutive_failures"] = 0
+        entry["needs_review"] = False
+        entry["last_error"] = ""
+    else:
+        entry["consecutive_failures"] = entry.get("consecutive_failures", 0) + 1
+        entry["last_error"] = error_type or "unknown"
+        if entry["consecutive_failures"] >= 3:
+            entry["needs_review"] = True
+    entry["last_updated"] = dt.datetime.now(dt.timezone.utc).isoformat()
+    health[account] = entry
+    try:
+        tmp = ACCOUNT_HEALTH_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(health, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, ACCOUNT_HEALTH_PATH)
+    except Exception as e:
+        print(f"[account health] 保存失敗: {e}")
 
 
 def _check_snapshot_status(snapshot_id: str) -> tuple[str, dict]:
@@ -1252,11 +1322,15 @@ def _print_batch_fetch_summary(
     batches: list,
     failed_accounts: list,
     category: str,
+    pending_next_run: list | None = None,
 ) -> None:
     """
     全バッチ完了後にアカウント別・バッチ別の取得結果サマリーを表示する。
     【2026-07-20追加】
+    pending_next_run: タイムアウトにより次回自動回収するアカウントリスト（失敗扱いしない）
     """
+    if pending_next_run is None:
+        pending_next_run = []
     # アカウント別取得件数
     account_counts: dict[str, int] = {}
     for p in posts:
@@ -1274,6 +1348,7 @@ def _print_batch_fetch_summary(
         batch_post_counts[meta.get("batch_key", "")] = count
 
     failed_set = {a.lower() for a in failed_accounts}
+    pending_set = {a.lower() for a in pending_next_run}
 
     print()
     print("=" * 60)
@@ -1285,7 +1360,14 @@ def _print_batch_fetch_summary(
     print("  アカウント別取得件数:")
     for acct in all_batch_accounts:
         cnt = account_counts.get(acct.lower(), 0)
-        status = "失敗" if acct.lower() in failed_set else ("0件" if cnt == 0 else f"{cnt}件")
+        if acct.lower() in failed_set:
+            status = "失敗"
+        elif acct.lower() in pending_set:
+            status = "処理中・次回回収"
+        elif cnt == 0:
+            status = "0件"
+        else:
+            status = f"{cnt}件"
         print(f"    {acct}: {status}")
 
     print()
@@ -1297,32 +1379,57 @@ def _print_batch_fetch_summary(
         acct_names = ", ".join(batch)
         batch_key = "|".join(sorted(batch))
         cnt = batch_post_counts.get(batch_key, 0)
-        status_label = "成功" if bd_status == "ready" else bd_status
+        if bd_status == "ready":
+            status_label = "成功"
+        elif bd_status == "running":
+            status_label = "処理中・次回回収"
+        else:
+            status_label = bd_status
         print(f"    バッチ{bi}/{len(batches)} [{status_label}] {acct_names} → {cnt}件")
 
-    # スキップされたバッチ（snapshot_metaにない）
+    # キューに積まれたまま未実行のバッチ
     if len(snapshot_meta) < len(batches):
         for bi in range(len(snapshot_meta) + 1, len(batches) + 1):
-            print(f"    バッチ{bi}/{len(batches)} [スキップ] (全体タイムアウトにより未実行)")
+            print(f"    バッチ{bi}/{len(batches)} [次回回収] (タイムアウトにより未実行)")
 
     print()
 
     # ③ 集計
-    completed = sum(1 for m in snapshot_meta if m.get("bd_status") == "ready")
-    failed = sum(1 for m in snapshot_meta if m.get("bd_status") not in ("ready", "recovered"))
+    completed = sum(1 for m in snapshot_meta if m.get("bd_status") in ("ready", "recovered"))
+    truly_failed = sum(1 for m in snapshot_meta if m.get("bd_status") not in ("ready", "recovered", "running"))
+    pending_count = sum(1 for m in snapshot_meta if m.get("bd_status") == "running")
     skipped = len(batches) - len(snapshot_meta)
     succeeded_accounts = len(
-        {a.lower() for a in all_batch_accounts if a.lower() not in failed_set and account_counts.get(a.lower(), 0) > 0}
+        {a.lower() for a in all_batch_accounts if a.lower() not in failed_set and a.lower() not in pending_set and account_counts.get(a.lower(), 0) > 0}
     )
     print(f"  完了バッチ: {completed}/{len(batches)}件")
-    if failed:
-        print(f"  失敗バッチ: {failed}件")
-    if skipped:
-        print(f"  スキップ:   {skipped}件 (全体タイムアウト)")
+    if truly_failed:
+        print(f"  失敗バッチ: {truly_failed}件 (Bright Data APIエラー)")
+    if pending_count or skipped:
+        print(f"  次回回収:   {pending_count + skipped}件 (処理中タイムアウト)")
     print(f"  取得成功アカウント: {succeeded_accounts}/{len(all_batch_accounts)}件")
+    if pending_next_run:
+        print(f"  次回回収アカウント: {len(pending_next_run)}件")
     print(f"  取得投稿合計: {len([p for p in posts if not p.get('fetch_error')])}件")
 
-    # ⑥ 取得できたアカウントが5未満の場合は警告
+    # account_health 更新
+    for acct in all_batch_accounts:
+        acct_l = acct.lower()
+        if acct_l in failed_set:
+            _update_account_health(acct, success=False, error_type="fetch_failed")
+        elif acct_l in pending_set:
+            pass  # 次回回収 → 成否不明なので更新しない
+        elif account_counts.get(acct_l, 0) > 0:
+            _update_account_health(acct, success=True)
+
+    # 要確認アカウント表示
+    health = _load_account_health()
+    needs_review = [a for a, h in health.items() if h.get("needs_review")]
+    if needs_review:
+        print()
+        print(f"  ⚠️  要確認アカウント（連続3回以上失敗）: {', '.join(needs_review)}")
+
+    # 取得できたアカウントが5未満の場合は警告
     if succeeded_accounts < 5 and len(all_batch_accounts) >= 5:
         print()
         print("  ⚠️  取得処理に異常がある可能性があります")
@@ -1441,28 +1548,31 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             "outage_reason": trigger_block_reason,
         }
 
-    failed_accounts = []
+    failed_accounts: list = []
+    pending_next_run: list = []  # タイムアウト時に次回回収するアカウント
     fetch_start = time.monotonic()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # フェーズ1: 全バッチを一括 trigger（非同期化の核心）
-    # 各バッチごとに trigger → 即時 snapshot_id 取得。待たずに次へ進む。
+    # フェーズ1: キュー方式で新規バッチをtrigger（最大BRIGHT_DATA_MAX_CONCURRENT同時実行）
+    # pending にある前回ジョブは即時 running_jobs へ追加する。
+    # 新規triggerはキューから順次投入し、同時実行数を上限以内に保つ。
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     # running_jobs: {batch_key: {snapshot_id, accounts, batch_index}} — ポーリング対象
     running_jobs: dict[str, dict] = {}
+    # trigger_queue: まだ trigger していないバッチのインデックスリスト
+    trigger_queue: list[int] = []
 
     print()
-    print(f"  ─ フェーズ1: 全{len(batches)}バッチを一括 trigger ─")
+    print(f"  ─ フェーズ1: キュー方式trigger (最大{BRIGHT_DATA_MAX_CONCURRENT}同時実行) ─")
+
+    # まず pending にある前回ジョブを確認して running_jobs に追加し、
+    # 新規triggerが必要なバッチはキューに積む
     for batch_index, batch_usernames in enumerate(batches, start=1):
         batch_key = "|".join(sorted(batch_usernames))
 
-        # 前回未完了ジョブがある場合: 状態確認してrunningならそのまま流用、readyなら後でdownload
         if batch_key in pending:
             pending_sid = pending[batch_key].get("snapshot_id")
-            # 【pending 再利用の正常性確認 (2026-07-20)】
-            # Bright Data のスナップショットは作成後 24 時間程度で破棄される場合がある。
-            # triggered_at から経過時間を確認し、古すぎる pending は新規 trigger する。
             triggered_at_str = pending[batch_key].get("triggered_at", "")
             pending_stale = False
             if triggered_at_str:
@@ -1478,9 +1588,7 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
                         del updated_pending[batch_key]
                 except Exception:
                     pass
-            if pending_stale:
-                pass  # fallthrough to new trigger
-            else:
+            if not pending_stale:
                 status, _status_detail = _check_snapshot_status(pending_sid)
                 dashboard_url = BD_SNAPSHOT_DASHBOARD_URL.format(snapshot_id=pending_sid)
                 state = _classify_snapshot_state({**pending[batch_key], "bd_status": status})
@@ -1493,19 +1601,28 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
                     print(f"    ⚠️  error: {_status_detail['error_message']}")
                 if status in ("ready", "running"):
                     running_jobs[batch_key] = {
-                        "snapshot_id":    pending_sid,
-                        "accounts":       batch_usernames,
-                        "batch_index":    batch_index,
-                        "recovered":      status == "ready",
+                        "snapshot_id":      pending_sid,
+                        "accounts":         batch_usernames,
+                        "batch_index":      batch_index,
+                        "recovered":        status == "ready",
                         "triggered_at_iso": pending[batch_key].get("triggered_at", ""),
                     }
                     continue
                 elif status == "failed":
                     del updated_pending[batch_key]
-                    # fallthrough: 新規trigger
+                    # fallthrough → キューに積む
                 else:
                     del updated_pending[batch_key]
+                    # fallthrough → キューに積む
 
+        # 新規triggerが必要なバッチをキューに積む
+        trigger_queue.append(batch_index - 1)  # 0-indexed
+
+    def _trigger_one_batch(batch_index_0: int) -> bool:
+        """キューから1バッチをtriggerして running_jobs に追加する。True=成功。"""
+        batch_usernames = batches[batch_index_0]
+        batch_index = batch_index_0 + 1
+        batch_key = "|".join(sorted(batch_usernames))
         input_list = [
             {
                 "url": _to_profile_url(username),
@@ -1515,10 +1632,7 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             }
             for username in batch_usernames
         ]
-        print(
-            f"  バッチ{batch_index}/{len(batches)}: trigger → "
-            f"{', '.join(batch_usernames)}"
-        )
+        print(f"  バッチ{batch_index}/{len(batches)}: trigger → {', '.join(batch_usernames)}")
         snapshot_id, bd_status, trigger_error = _trigger_batch(input_list)
 
         if snapshot_id is None:
@@ -1538,65 +1652,76 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
                 "accounts":    batch_usernames,
                 "recovered":   False,
             })
-            continue
+            return False
 
-        # 重複保存チェック: 同じ snapshot_id が既に pending にある場合はスキップ
         existing_sids = {v.get("snapshot_id") for v in updated_pending.values()}
-        if snapshot_id in existing_sids:
-            print(f"  バッチ{batch_index}: snapshot_id={snapshot_id} は既に pending に存在 → 重複スキップ")
-        else:
+        if snapshot_id not in existing_sids:
             dashboard_url = BD_SNAPSHOT_DASHBOARD_URL.format(snapshot_id=snapshot_id)
-            print(f"  バッチ{batch_index}: snapshot_id={snapshot_id} 取得 → ポーリング待機へ")
+            print(f"  バッチ{batch_index}: snapshot_id={snapshot_id} → ポーリング待機へ")
             print(f"    Dashboard: {dashboard_url}")
-            # trigger直後に即時永続化
             updated_pending[batch_key] = {
-                "snapshot_id":    snapshot_id,
-                "accounts":       batch_usernames,
-                "triggered_at":   now.isoformat(),
-                "bd_status":      "running",
+                "snapshot_id":  snapshot_id,
+                "accounts":     batch_usernames,
+                "triggered_at": now.isoformat(),
+                "bd_status":    "running",
             }
             _save_pending_snapshots(updated_pending)
+        else:
+            print(f"  バッチ{batch_index}: snapshot_id={snapshot_id} は既に pending に存在 → 重複スキップ")
 
         running_jobs[batch_key] = {
-            "snapshot_id":    snapshot_id,
-            "accounts":       batch_usernames,
-            "batch_index":    batch_index,
-            "recovered":      False,
+            "snapshot_id":      snapshot_id,
+            "accounts":         batch_usernames,
+            "batch_index":      batch_index,
+            "recovered":        False,
             "triggered_at_iso": now.isoformat(),
         }
+        return True
 
-    print(f"  ─ フェーズ1完了: {len(running_jobs)}バッチのtrigger成功 ─")
+    # pending から復元したジョブが既にあるので、空きスロット分だけ新規triggerする
+    while trigger_queue and len(running_jobs) < BRIGHT_DATA_MAX_CONCURRENT:
+        idx = trigger_queue.pop(0)
+        _trigger_one_batch(idx)
+
+    print(f"  ─ フェーズ1完了: {len(running_jobs)}バッチtrigger済, キュー残{len(trigger_queue)}件 ─")
     print()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # フェーズ2: 全スナップショットを巡回ポーリング → ready になり次第 download
+    # フェーズ2: スナップショットを巡回ポーリング → ready になり次第 download
+    #           完了スロットが空いたらキューの次のバッチをtrigger
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     remaining_jobs = dict(running_jobs)  # コピー: 完了したものは削除していく
     poll_deadline = fetch_start + FETCH_TOTAL_BUDGET_SEC
+    total_batches_display = len(batches)
 
-    print(f"  ─ フェーズ2: {len(remaining_jobs)}バッチのポーリング開始 ─")
+    print(f"  ─ フェーズ2: {len(remaining_jobs)}バッチのポーリング開始 (キュー残{len(trigger_queue)}件) ─")
 
-    while remaining_jobs:
+    while remaining_jobs or trigger_queue:
         elapsed = time.monotonic() - fetch_start
         if time.monotonic() >= poll_deadline:
             timed_out = list(remaining_jobs.keys())
             print(
                 f"  [タイムアウト] 全体予算{FETCH_TOTAL_BUDGET_SEC}秒を超過({elapsed:.0f}秒)。"
-                f"残り{len(timed_out)}バッチを未回収としてpending保存します。"
+                f"残り{len(timed_out)}バッチを次回回収としてpending保存します。"
             )
             for bkey in timed_out:
                 job = remaining_jobs[bkey]
-                failed_accounts.extend(job["accounts"])
+                # running中ジョブは failed ではなく次回回収扱い
+                pending_next_run.extend(job["accounts"])
                 snapshot_meta.append({
                     "batch_key": bkey,
                     "snapshot_id": job["snapshot_id"],
                     "bd_status": "running",
-                    "error_msg": "全体タイムアウトにより未回収",
+                    "error_msg": "全体タイムアウトにより未回収（次回自動回収）",
                     "accounts": job["accounts"],
                     "recovered": False,
                 })
                 if bkey in updated_pending:
                     updated_pending[bkey]["bd_status"] = "running"
+            # キュー未処理バッチも次回回収
+            for qi in trigger_queue:
+                pending_next_run.extend(batches[qi])
+            trigger_queue.clear()
             break
 
         completed_this_round = []
@@ -1712,11 +1837,19 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
         for bkey in completed_this_round:
             del remaining_jobs[bkey]
 
-        if remaining_jobs:
+        # 完了したスロット分だけキューから次のバッチをtrigger
+        while trigger_queue and len(running_jobs) < BRIGHT_DATA_MAX_CONCURRENT:
+            idx = trigger_queue.pop(0)
+            if _trigger_one_batch(idx):
+                bkey_new = "|".join(sorted(batches[idx]))
+                remaining_jobs[bkey_new] = running_jobs[bkey_new]
+
+        if remaining_jobs or trigger_queue:
             elapsed = time.monotonic() - fetch_start
             remaining_secs = poll_deadline - time.monotonic()
+            queue_info = f", キュー待ち{len(trigger_queue)}件" if trigger_queue else ""
             print(
-                f"  ─ {len(remaining_jobs)}バッチまだ処理中。"
+                f"  ─ {len(remaining_jobs)}バッチまだ処理中{queue_info}。"
                 f"{POLL_INTERVAL_SEC}秒後に再確認 (残り{remaining_secs:.0f}秒) ─"
             )
             time.sleep(POLL_INTERVAL_SEC)
@@ -1724,6 +1857,11 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
     print(f"  ─ フェーズ2完了 ─")
     print()
 
+    if pending_next_run:
+        print(
+            f"{category}: 処理中・次回回収（タイムアウト）アカウント"
+            f"({len(pending_next_run)}件): {', '.join(pending_next_run)}"
+        )
     if failed_accounts:
         print(
             f"{category}: 取得失敗(ジョブ失敗/タイムアウト)したアカウント"
@@ -1731,7 +1869,7 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
         )
 
     # ── バッチ完了サマリー ────────────────────────────────────────────────────
-    _print_batch_fetch_summary(posts, snapshot_meta, batches, failed_accounts, category)
+    _print_batch_fetch_summary(posts, snapshot_meta, batches, failed_accounts, category, pending_next_run)
 
     # ── Instagram取得品質レポート ────────────────────────────────────────────
     quality = print_instagram_fetch_quality_report(posts, usernames, category)

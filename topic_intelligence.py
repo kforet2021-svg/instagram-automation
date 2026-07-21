@@ -32,6 +32,7 @@ Observation優先比率: Observation 70% / World Context 20% / SNSトレンド 1
 
 from __future__ import annotations
 
+import os
 import sys
 import textwrap
 from typing import Optional
@@ -504,3 +505,177 @@ def select_topic_interactive(
     print(f"  ⚠️ 「{choice}」は認識できませんでした。1位を使用します。")
     print(f"  ✅ 選択: 「{hook}」\n")
     return selected
+
+
+# ── CORE HARI 専門視点キーワード ────────────────────────────────────────────
+_CORE_HARI_AXES = [
+    "咬筋", "顎", "舌", "舌骨", "首", "胸郭", "頭皮", "表情筋",
+    "呼吸", "姿勢", "骨盤", "肋骨", "後頭部", "噛み癖", "食いしばり",
+    "左右差", "顔の非対称", "顔筋", "リンパ",
+]
+
+# 一般論スコアを上げる危険ワード
+_GENERIC_PATTERNS = [
+    "知っていますか", "ご存知ですか", "気をつけましょう",
+    "大切です", "重要です", "意識しましょう",
+    "かもしれません", "可能性があります",
+    "マッサージ", "保湿", "水を飲む", "日焼け止め",
+]
+
+# 医学的断定パターン（HYPOTHESISへ）
+_MEDICAL_ASSERTION_PATTERNS = [
+    "原因です", "引き起こします", "なります", "悪化します",
+    "が原因になる", "によって起こる",
+]
+
+
+def score_hook_quality(candidate: dict) -> dict:
+    """
+    Hook候補の品質スコアを評価する。
+
+    Returns:
+      {
+        "generic_score":        0〜100（低いほど良い）
+        "specificity_score":    0〜100（高いほど良い）
+        "core_hari_depth":      0〜100（高いほど良い）
+        "discovery_score":      0〜100（高いほど良い）
+        "medical_assertion_risk": bool
+        "passes_quality_gate":  bool
+        "gate_failure_reason":  str
+      }
+    """
+    hook      = candidate.get("hook", "")
+    reason    = candidate.get("reason", "")
+    angle     = candidate.get("angle", "")
+    persp     = candidate.get("perspective", "")
+    combined  = f"{hook} {reason} {angle} {persp}"
+
+    # generic_score: 一般論パターンが多いほど高い
+    generic_hits = sum(1 for p in _GENERIC_PATTERNS if p in combined)
+    generic_score = min(100, generic_hits * 25)
+
+    # specificity_score: 観察可能な具体指標があるほど高い
+    _SPECIFIC_PATTERNS = [
+        "左右差", "位置", "確認", "見ます", "触ります", "順番", "先に",
+        "まず", "チェック", "気づ", "観察", "動き", "クセ", "癖",
+    ]
+    specific_hits = sum(1 for p in _SPECIFIC_PATTERNS if p in combined)
+    specificity_score = min(100, specific_hits * 20)
+
+    # core_hari_depth_score
+    core_hits = sum(1 for ax in _CORE_HARI_AXES if ax in combined)
+    core_hari_depth = min(100, core_hits * 30)
+
+    # discovery_score: 意外性・ギャップ
+    _DISCOVERY_PATTERNS = [
+        "実は", "意外", "知らなかった", "違い", "ギャップ",
+        "なぜ", "なのか", "だから", "つながり", "関係",
+    ]
+    disc_hits = sum(1 for p in _DISCOVERY_PATTERNS if p in combined)
+    discovery_score = min(100, disc_hits * 25)
+
+    # 医学的断定チェック
+    medical_risk = any(p in combined for p in _MEDICAL_ASSERTION_PATTERNS)
+
+    # 品質ゲート判定
+    gate_failure_reason = ""
+    passes = True
+    if generic_score >= 50:
+        passes = False
+        gate_failure_reason = f"一般論スコアが高すぎます（generic_score={generic_score}）"
+    elif specificity_score < 20 and core_hari_depth < 20:
+        passes = False
+        gate_failure_reason = "CORE HARI専門視点と具体観察ポイントが不足"
+    elif medical_risk:
+        passes = False
+        gate_failure_reason = "医学的断定表現が含まれています（要弱文化）"
+
+    return {
+        "generic_score":          generic_score,
+        "specificity_score":      specificity_score,
+        "core_hari_depth":        core_hari_depth,
+        "discovery_score":        discovery_score,
+        "medical_assertion_risk": medical_risk,
+        "passes_quality_gate":    passes,
+        "gate_failure_reason":    gate_failure_reason,
+    }
+
+
+def load_content_history(days: int = 30) -> list[dict]:
+    """過去N日の生成テーマ履歴を runtime_state/content_history.json から読み込む。"""
+    import datetime as _dt, json as _json
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime_state", "content_history.json")
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                history = _json.load(f)
+            cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+            return [h for h in history if _dt.datetime.fromisoformat(h.get("date", "2000-01-01")).replace(tzinfo=_dt.timezone.utc) > cutoff]
+    except Exception:
+        pass
+    return []
+
+
+def save_content_history(theme: str, hook: str, core_hari_axis: str, fmt: str, purpose: str) -> None:
+    """今日の生成テーマを runtime_state/content_history.json に追記する。"""
+    import datetime as _dt, json as _json
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime_state", "content_history.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    history = []
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                history = _json.load(f)
+    except Exception:
+        pass
+    history.append({
+        "date": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "theme": theme,
+        "hook": hook,
+        "core_hari_axis": core_hari_axis,
+        "format": fmt,
+        "purpose": purpose,
+    })
+    # 90日分のみ保持
+    cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=90)
+    history = [h for h in history if _dt.datetime.fromisoformat(h.get("date", "2000-01-01")).replace(tzinfo=_dt.timezone.utc) > cutoff]
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump(history, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def check_theme_diversity(candidate: dict, history: list[dict]) -> dict:
+    """
+    候補テーマが過去30日の生成テーマと類似しているか評価する。
+    Returns: {"similarity_score": 0-100, "too_similar": bool, "similar_recent": list}
+    """
+    hook       = candidate.get("hook", "").lower()
+    axis       = (candidate.get("perspective", "") or "").lower()
+    theme      = (candidate.get("theme", "") or "").lower()
+    similar    = []
+
+    for h in history:
+        past_hook  = h.get("hook", "").lower()
+        past_axis  = h.get("core_hari_axis", "").lower()
+        past_theme = h.get("theme", "").lower()
+
+        score = 0
+        if axis and axis in past_axis:
+            score += 40
+        if theme and theme in past_theme:
+            score += 30
+        # 共通単語チェック（5文字以上）
+        words_now  = set(w for w in theme.split() if len(w) >= 2)
+        words_past = set(w for w in past_theme.split() if len(w) >= 2)
+        if words_now & words_past:
+            score += 20
+        if score >= 40:
+            similar.append({"hook": h.get("hook", ""), "score": score, "date": h.get("date", "")})
+
+    similarity_score = max((s["score"] for s in similar), default=0)
+    return {
+        "similarity_score": similarity_score,
+        "too_similar": similarity_score >= 60,
+        "similar_recent": similar[:3],
+    }

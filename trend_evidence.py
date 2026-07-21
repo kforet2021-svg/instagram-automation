@@ -470,3 +470,143 @@ def format_evidence_block(candidate: dict) -> str:
         lines.append("")
         lines.append(f"  採用理由: {reason}")
     return "\n".join(lines)
+
+
+def evidence_score_post(post: dict) -> dict:
+    """
+    投稿ごとの Evidence スコアを計算する（0〜100各項目）。
+    欠損値と0実績を区別する（None = 未取得, 0 = 実際に0）。
+
+    Returns:
+      {
+        "recency_score": 0-100,
+        "views_score": 0-100,
+        "follower_ratio_score": 0-100,
+        "like_rate_score": 0-100,
+        "comment_rate_score": 0-100,
+        "data_completeness_score": 0-100,
+        "evidence_score": 0-100,
+        "views_available": bool,
+        "date_available": bool,
+        "date_within_10days": bool,
+      }
+    """
+    import datetime as _dt
+
+    now = _dt.datetime.now(_dt.timezone.utc)
+
+    # ── 投稿日 ────────────────────────────────────────────────────────────────
+    date_available = False
+    date_within_10 = False
+    recency_score  = 0
+    ts = post.get("timestamp") or post.get("post_date") or ""
+    if ts:
+        try:
+            t = _dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            # 未来日付・異常日付チェック
+            if t > now + _dt.timedelta(days=1):
+                pass  # 異常日付: スコアなし
+            elif t > now - _dt.timedelta(days=365):
+                date_available = True
+                age_days = (now - t).days
+                date_within_10 = age_days <= 10
+                recency_score = max(0, 100 - age_days * 3)  # 33日で0点
+        except Exception:
+            pass
+
+    # ── 再生数 ────────────────────────────────────────────────────────────────
+    # 0 は「実際0再生」なので or で読み飛ばしてはいけない（None と区別する）
+    if "play_count" in post and post["play_count"] is not None:
+        raw_views = post["play_count"]
+    elif "video_view_count" in post and post["video_view_count"] is not None:
+        raw_views = post["video_view_count"]
+    else:
+        raw_views = None
+    views_available = raw_views is not None  # None = 未取得, 0 = 実際0
+    views = float(raw_views) if raw_views is not None else 0.0
+    views_score = 0
+    if views_available:
+        views_score = min(100, int(views / 10000))  # 100万再生で100点
+
+    # ── フォロワー比 ──────────────────────────────────────────────────────────
+    followers = post.get("followers") or post.get("followers_count") or 0
+    follower_ratio_score = 0
+    if followers > 0 and views_available and views > 0:
+        ratio = views / followers
+        follower_ratio_score = min(100, int(ratio * 50))
+
+    # ── いいね率・コメント率 ──────────────────────────────────────────────────
+    likes    = post.get("like_count") or post.get("likes_count") or 0
+    comments = post.get("comment_count") or post.get("comments_count") or 0
+    denom    = followers if followers > 0 else None
+    like_rate_score    = min(100, int(likes / denom * 1000)) if denom else 0
+    comment_rate_score = min(100, int(comments / denom * 5000)) if denom else 0
+
+    # ── データ完全性 ──────────────────────────────────────────────────────────
+    fields_available = sum([
+        date_available, views_available,
+        followers > 0, likes > 0,
+    ])
+    data_completeness_score = int(fields_available / 4 * 100)
+
+    # ── 総合 evidence_score ───────────────────────────────────────────────────
+    evidence_score = int(
+        recency_score * 0.25 +
+        views_score   * 0.25 +
+        follower_ratio_score * 0.20 +
+        like_rate_score      * 0.15 +
+        data_completeness_score * 0.15
+    )
+
+    return {
+        "recency_score":          recency_score,
+        "views_score":            views_score,
+        "follower_ratio_score":   follower_ratio_score,
+        "like_rate_score":        like_rate_score,
+        "comment_rate_score":     comment_rate_score,
+        "data_completeness_score": data_completeness_score,
+        "evidence_score":         evidence_score,
+        "views_available":        views_available,
+        "date_available":         date_available,
+        "date_within_10days":     date_within_10,
+    }
+
+
+def compute_account_diversity_score(ig_hits: list[dict]) -> dict:
+    """
+    参考Instagram投稿のアカウント多様性を評価する。
+    同一アカウントの連投は根拠件数を割り引く。
+    最低3アカウントで類似テーマが確認できているかを評価する。
+
+    Returns:
+      {
+        "unique_accounts": int,
+        "account_diversity_score": 0-100,
+        "effective_evidence_count": int,  # 重複割引後の実効件数
+        "meets_multi_account_threshold": bool,  # 3アカウント以上
+      }
+    """
+    if not ig_hits:
+        return {
+            "unique_accounts": 0,
+            "account_diversity_score": 0,
+            "effective_evidence_count": 0,
+            "meets_multi_account_threshold": False,
+        }
+
+    account_counts: dict[str, int] = {}
+    for h in ig_hits:
+        acct = (h.get("account") or h.get("source_account") or h.get("username") or "unknown").lower()
+        account_counts[acct] = account_counts.get(acct, 0) + 1
+
+    unique = len(account_counts)
+    # 重複割引: 同一アカウントの2件目以降は0.5件としてカウント
+    effective = sum(1 + (cnt - 1) * 0.5 for cnt in account_counts.values())
+    diversity_score = min(100, unique * 20)  # 5アカウントで100点
+
+    return {
+        "unique_accounts": unique,
+        "account_diversity_score": diversity_score,
+        "effective_evidence_count": int(effective),
+        "meets_multi_account_threshold": unique >= 3,
+    }
