@@ -262,6 +262,57 @@ def _get_seasonal_evidence(world_ctx: dict, keyword: str) -> str:
     return ""
 
 
+def _has_valid_instagram_evidence(ig_hits: list[dict], min_count: int = 3) -> bool:
+    """
+    Instagram根拠として有効かどうかを判定する。
+    - 有効件数が min_count 未満 → 無効
+    - 再生数が取得できている件数が0 → 最上位根拠に使わない
+    """
+    if len(ig_hits) < min_count:
+        return False
+    # 再生数が1件も取れていない場合は根拠として弱い
+    has_views = any(h.get("plays", 0) for h in ig_hits)
+    return has_views
+
+
+def filter_ig_hits_by_relevance(
+    ig_hits: list[dict],
+    topic_keywords: list[str],
+) -> list[dict]:
+    """
+    参考Instagram投稿のうち、topicと関連性が低いものを除外する。
+
+    topic_keywords: テーマを表すキーワードリスト（例: ["咬筋", "左右差"]）
+    判定: キャプション or タイトルに1つ以上含まれるものを「関連あり」とする。
+    無関連の投稿は参考根拠から除外する。
+    """
+    if not topic_keywords:
+        return ig_hits
+
+    # 無関係ジャンルキーワード（美容一般の無関係例）
+    _IRRELEVANT_KEYWORDS = [
+        "AI", "人工知能", "針美容液", "スキンケア", "美白", "SPF", "UV", "日焼け止め",
+        "サプリメント", "ダイエット", "痩身", "ファッション", "コーデ", "メイク", "リップ",
+        "アイシャドウ", "ネイル", "料理", "レシピ", "インテリア",
+    ]
+
+    relevant = []
+    for hit in ig_hits:
+        cap = (hit.get("caption", "") or "").lower()
+        title = (hit.get("title", "") or "").lower()
+        combined = cap + " " + title
+
+        # 無関係ジャンル除外
+        if any(irr.lower() in combined for irr in _IRRELEVANT_KEYWORDS):
+            continue
+
+        # topic_keywords との一致チェック
+        if any(kw.lower() in combined for kw in topic_keywords):
+            relevant.append(hit)
+
+    return relevant
+
+
 def _assign_level(
     ig_hits: list[dict],
     own_hits: list[dict],
@@ -275,15 +326,21 @@ def _assign_level(
       - Instagram根拠は使用不可（今回取得0件のため）
       - 最高レベルは C（レベルA・Bは禁止）
 
+    追加ルール:
+      - Instagram根拠が3件未満、または再生数が1件も取れていない場合はA/Bにしない
+      - いいね数だけで伸びている投稿（再生数0）は最上位根拠に使わない
+
     Returns: (level, reason_text)
     """
     has_instagram = len(ig_hits) > 0 and not ig_zero_today
     has_own       = len(own_hits) > 0
     has_seasonal  = bool(seasonal)
+    # 有効なInstagram根拠（件数・再生数チェック通過）
+    ig_valid = has_instagram and _has_valid_instagram_evidence(ig_hits, min_count=3)
 
     # A: Instagram あり + 季節性あり（2媒体）
-    # ig_zero_today のとき A は禁止
-    if has_instagram and has_seasonal and not ig_zero_today:
+    # ig_zero_today のとき A は禁止; 有効根拠不足のときも A は禁止
+    if ig_valid and has_seasonal and not ig_zero_today:
         count = len(ig_hits)
         reason = (
             f"Instagramの直近投稿{count}件でキーワードを確認。"
@@ -292,8 +349,8 @@ def _assign_level(
         return "A", reason
 
     # B: Instagramだけで複数件、または高いいいね数
-    # ig_zero_today のとき B は禁止
-    if has_instagram and not ig_zero_today:
+    # ig_zero_today のとき B は禁止; 有効根拠不足のときも B は禁止
+    if ig_valid and not ig_zero_today:
         top = ig_hits[0]
         count = len(ig_hits)
         reason = (
@@ -301,6 +358,13 @@ def _assign_level(
             f"最高いいね: {top.get('likes', 0)}件。"
         )
         return "B", reason
+
+    # Instagram hit はあるが有効根拠未満 → 不足ログ
+    if has_instagram and not ig_valid and not ig_zero_today:
+        count = len(ig_hits)
+        plays_count = sum(1 for h in ig_hits if h.get("plays", 0))
+        # Bには使えないが、Cの補足情報として保持
+        pass
 
     # C: 季節性のみ
     if has_seasonal:

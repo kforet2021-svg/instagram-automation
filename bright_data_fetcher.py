@@ -163,6 +163,9 @@ DEBUG_SNAPSHOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "
 # タイムアウト時はsnapshot_idをここに書き込み、次回実行時に状態を再確認する。
 # 同一バッチキーで重複ジョブを作らないための排他制御にも使う。
 PENDING_SNAPSHOTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pending_snapshots.json")
+ACCOUNT_ROTATION_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "runtime_state", "account_rotation.json"
+)
 
 # Reels - Discover by URL 用のdataset_id。
 # 公式ドキュメントで「Discover by URL用には必ずこの値を使うこと」と
@@ -312,24 +315,106 @@ def _to_profile_url(account: str) -> str:
     return f"https://www.instagram.com/{username}/"
 
 
+def _load_rotation_state() -> dict:
+    """runtime_state/account_rotation.json を読み込む。ファイルがなければ空dict。"""
+    try:
+        if os.path.exists(ACCOUNT_ROTATION_PATH):
+            with open(ACCOUNT_ROTATION_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"[ローテーション] 状態ファイル読み込み失敗（初期化します）: {e}")
+    return {}
+
+
+def _save_rotation_state(state: dict) -> None:
+    """runtime_state/account_rotation.json に状態を保存する。"""
+    try:
+        os.makedirs(os.path.dirname(ACCOUNT_ROTATION_PATH), exist_ok=True)
+        with open(ACCOUNT_ROTATION_PATH, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[ローテーション] 状態ファイル保存失敗: {e}")
+
+
 def _apply_test_mode_limit(usernames: list, category: str) -> list:
     """
-    TEST_MODE中は、1回の実行でTEST_MODE_MAX_TOTAL_ACCOUNTS件までしか
-    アカウントを取得対象にしない。
-    本番モード(TEST_MODE=False)かつ登録アカウント > 5件なのに
-    対象が5件以下になっていたら設定ミス警告を出す(処理は続ける)。
+    TEST_MODE中はアカウントを5件ずつローテーションして取得する。
+    毎回先頭5件ではなく、前回の続きから5件を選ぶ。
+    pending中のアカウントは選択対象から除外し、triggerの重複を防ぐ。
+    本番モードでは全件対象（ローテーション制限なし）。
     """
-    if TEST_MODE:
-        limited = usernames[:TEST_MODE_MAX_TOTAL_ACCOUNTS]
-        if len(limited) < len(usernames):
-            print(
-                f"[テストモード] {category}: 登録{len(usernames)}件中{len(limited)}件のみ取得 "
-                f"(BRIGHT_DATA_TEST_MODE=1 または TEST_MODE=True)"
-            )
-        return limited
+    if not TEST_MODE:
+        return usernames
 
-    # 本番モード: 全件対象
-    return usernames
+    # 重複除外した一意リスト（順序保持）
+    seen: set[str] = set()
+    unique: list[str] = []
+    for u in usernames:
+        if u not in seen:
+            seen.add(u)
+            unique.append(u)
+
+    if not unique:
+        return []
+
+    # pending中のアカウントを除外
+    try:
+        pending = _load_pending_snapshots()
+        pending_accounts: set[str] = set()
+        for info in pending.values():
+            for acc in info.get("accounts", []):
+                pending_accounts.add(_to_username(acc))
+        available = [u for u in unique if u not in pending_accounts]
+        if pending_accounts:
+            print(
+                f"[ローテーション] pending中: {len(pending_accounts)}件を除外 "
+                f"→ 対象候補: {len(available)}件"
+            )
+    except Exception:
+        available = unique
+
+    if not available:
+        print("[ローテーション] pending除外後に対象アカウントが0件。pendingを待機中。")
+        return []
+
+    total = len(available)
+
+    # ローテーション状態を読み込む
+    state = _load_rotation_state()
+    start_idx = state.get(category, {}).get("next_start", 0)
+    # アカウント一覧の変更に対応: 範囲外なら先頭へ
+    if start_idx >= total:
+        start_idx = 0
+
+    # 5件選択（末尾を超えたら先頭に折り返す）
+    size = TEST_MODE_MAX_TOTAL_ACCOUNTS
+    if total <= size:
+        selected = available[:]
+        next_start = 0
+    else:
+        end_idx = start_idx + size
+        if end_idx <= total:
+            selected = available[start_idx:end_idx]
+        else:
+            # 折り返し
+            selected = available[start_idx:] + available[: end_idx - total]
+        next_start = end_idx % total
+
+    # 状態保存
+    if category not in state:
+        state[category] = {}
+    state[category]["next_start"] = next_start
+    state[category]["last_selected"] = selected
+    _save_rotation_state(state)
+
+    print(
+        f"[テストモード・ローテーション] {category}: "
+        f"登録{len(unique)}件中 {start_idx + 1}〜{start_idx + len(selected)}番 の{len(selected)}件を選択"
+        f"（次回開始: {next_start + 1}番）"
+    )
+    print(f"  選択アカウント: {', '.join(selected)}")
+
+    return selected
 
 
 def _get_value(obj, key: str, default=None):
@@ -1056,6 +1141,111 @@ def _download_snapshot(snapshot_id: str) -> tuple[bool, list, str]:
     return True, items, "ready"
 
 
+def print_instagram_fetch_quality_report(
+    posts: list,
+    target_accounts: list,
+    category: str = "",
+) -> dict:
+    """
+    Instagram取得結果の品質確認レポートを表示し、品質グレードを返す。
+
+    戻り値:
+      {
+        "grade": "根拠あり" / "候補" / "不足",
+        "grade_label": str,   # 表示用ラベル
+        "total_posts": int,
+        "recent_posts": int,
+        "reels_count": int,
+        "account_count": int,  # 1件以上取得できたアカウント数
+        "has_views": int,
+        "has_followers": int,
+      }
+    """
+    import datetime as _dt
+
+    valid = [p for p in posts if not p.get("fetch_error")]
+    total = len(valid)
+
+    # 直近10日以内の投稿
+    now = _dt.datetime.now(_dt.timezone.utc)
+    cutoff10 = now - _dt.timedelta(days=10)
+    recent_count = 0
+    for p in valid:
+        ts = p.get("timestamp") or p.get("post_date") or ""
+        if ts:
+            try:
+                t = _dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                if t > cutoff10:
+                    recent_count += 1
+            except Exception:
+                pass
+
+    # リール数
+    reels_count = sum(1 for p in valid if p.get("is_reel") or p.get("type") == "reel")
+
+    # 再生数・フォロワー数取得率
+    has_views = sum(1 for p in valid if p.get("play_count", 0) or p.get("video_view_count", 0))
+    has_followers = sum(1 for p in valid if p.get("followers") or p.get("followers_count"))
+
+    # アカウント別取得件数
+    account_counts: dict[str, int] = {}
+    for p in valid:
+        acct = (p.get("source_account") or p.get("username") or "").strip().lower()
+        if acct:
+            account_counts[acct] = account_counts.get(acct, 0) + 1
+    account_count = len(account_counts)
+
+    # 分析可能なアカウント（2件以上取得）
+    analyzable = sum(1 for cnt in account_counts.values() if cnt >= 2)
+
+    # 品質グレード
+    if total >= 50 and account_count >= 20:
+        grade = "根拠あり"
+        grade_label = "✅ Instagramトレンド根拠あり（50投稿以上 / 20アカウント以上）"
+    elif total >= 20 and account_count >= 10:
+        grade = "候補"
+        grade_label = "⚠️  Instagramトレンド候補（20投稿以上 / 10アカウント以上）"
+    else:
+        grade = "不足"
+        grade_label = "❌ Instagram参考データ不足（20投稿未満 または 10アカウント未満）"
+
+    views_rate = f"{has_views}/{total} ({100*has_views//total if total else 0}%)"
+    followers_rate = f"{has_followers}/{total} ({100*has_followers//total if total else 0}%)"
+
+    print()
+    print("=" * 60)
+    print(f"【Instagram取得品質レポート】{f'({category})' if category else ''}")
+    print()
+    print(f"  登録アカウント総数     : {len(target_accounts)}件")
+    print(f"  取得投稿合計           : {total}件")
+    print(f"  直近10日以内の投稿     : {recent_count}件")
+    print(f"  リール数               : {reels_count}件")
+    print(f"  再生数取得率           : {views_rate}")
+    print(f"  フォロワー数取得率     : {followers_rate}")
+    print(f"  取得成功アカウント数   : {account_count}件")
+    print(f"  分析可能アカウント数   : {analyzable}件（2件以上取得）")
+    print()
+    print(f"  品質判定: {grade_label}")
+    if grade == "不足":
+        print()
+        print("  ※ Instagram根拠が不足しています。")
+        print("    生成テーマは「Instagramトレンド」ではなく")
+        print("    「季節・専門知識から作った投稿仮説」として扱います。")
+    print("=" * 60)
+    print()
+
+    return {
+        "grade": grade,
+        "grade_label": grade_label,
+        "total_posts": total,
+        "recent_posts": recent_count,
+        "reels_count": reels_count,
+        "account_count": account_count,
+        "has_views": has_views,
+        "has_followers": has_followers,
+    }
+
+
 def _print_batch_fetch_summary(
     posts: list,
     snapshot_meta: list,
@@ -1543,6 +1733,11 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
     # ── バッチ完了サマリー ────────────────────────────────────────────────────
     _print_batch_fetch_summary(posts, snapshot_meta, batches, failed_accounts, category)
 
+    # ── Instagram取得品質レポート ────────────────────────────────────────────
+    quality = print_instagram_fetch_quality_report(posts, usernames, category)
+    # quality["grade"] は fetch_trend_posts の呼び出し元へ伝搬させるために保持
+    # (現状はログ表示のみ; 将来 main.py で参照できるよう戻り値に含める)
+
     # 2026-07-18: 未完了ジョブ情報を書き戻す(変更があった場合のみ)
     if updated_pending != pending:
         _save_pending_snapshots(updated_pending)
@@ -1552,7 +1747,7 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
                 f"次回実行時に自動再確認します"
             )
 
-    return {"posts": posts, "snapshot_meta": snapshot_meta}
+    return {"posts": posts, "snapshot_meta": snapshot_meta, "ig_quality": quality}
 
 
 def _attach_account_post_counts(posts: list) -> None:
