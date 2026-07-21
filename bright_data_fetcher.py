@@ -168,6 +168,10 @@ PENDING_SNAPSHOTS_PATH = os.path.join(RUNTIME_STATE_DIR, "pending_snapshots.json
 _LEGACY_PENDING_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pending_snapshots.json")
 ACCOUNT_HEALTH_PATH = os.path.join(RUNTIME_STATE_DIR, "account_health.json")
 ACCOUNT_ROTATION_PATH = os.path.join(RUNTIME_STATE_DIR, "account_rotation.json")
+ABANDONED_ARCHIVE_PATH = os.path.join(RUNTIME_STATE_DIR, "abandoned_snapshots.json")
+
+# --retry-stale CLI が指定されたときに True にする（main.py から設定）
+RETRY_STALE = False
 
 # Reels - Discover by URL 用のdataset_id。
 # 公式ドキュメントで「Discover by URL用には必ずこの値を使うこと」と
@@ -207,20 +211,20 @@ FETCH_TOTAL_BUDGET_SEC = 300  # Bright Data全体に許可する最大秒数(5�
 # Bright Data Dashboard の snapshot 詳細ページURL（ログ表示・調査用）
 BD_SNAPSHOT_DASHBOARD_URL = "https://brightdata.com/cp/datasets/snapshots/{snapshot_id}"
 
-# ─── Stale / 障害検出しきい値 (2026-07-20) ───────────────────────────────────
-# Bright Data 側の障害で全 snapshot が running のまま完了しない事象への対処。
+# ─── Stale / 障害検出しきい値 (2026-07-20, 2026-07-21更新) ──────────────────
+# 状態区別（_classify_snapshot_state 参照）:
+#   active_running     : trigger 後 STALE_RUNNING_MIN 分未満  → 同時実行数へカウント
+#   stale_running      : STALE_RUNNING_MIN 分超〜ABANDONED_MIN 分  → 監視継続・カウントしない
+#   abandoned_candidate: ABANDONED_MIN 分超 → 要確認リストへ・カウントしない
+#   completed          : status=ready でダウンロード済み
+#   failed             : status=failed / canceled
+#   not_triggered      : snapshot_id がない
 #
-# 状態区別:
-#   completed    : status=ready でダウンロード済み
-#   failed       : status=failed (Bright Data が明示的に失敗を返した)
-#   running      : trigger 後 STALE_WARNING_MIN 分以内
-#   stale        : STALE_WARNING_MIN 分超〜STALE_ABORT_MIN 分
-#   not_triggered: trigger そのものを行っていない（trigger 禁止により）
-#
-STALE_WARNING_MIN  = 30   # これを超えると "stale" 警告
-STALE_ABORT_MIN    = 120  # これを超えると異常扱い（新規 trigger しない）
-MAX_RUNNING_TO_TRIGGER = 5  # running/stale がこの件数以上なら新規 trigger を禁止
-                             # （Bright Data 障害中の無限 trigger 防止）
+STALE_RUNNING_MIN  = 120   # 2時間以上で stale_running 判定（同時実行数から除外）
+ABANDONED_MIN      = 360   # 6時間以上で abandoned_candidate 判定（要確認）
+STALE_WARNING_MIN  = 30    # 表示用: この分を超えたら経過時間を警告色で表示
+MAX_ACTIVE_TO_BLOCK = 10   # active_running がこの件数以上なら新規 trigger を全停止
+                            # （stale/abandoned はカウントしない）
 
 # --- 通信リトライ設定 ---
 # Bright Data側、またはネットワーク経路で一時的に接続が切れる
@@ -803,12 +807,12 @@ def _snapshot_age_minutes(triggered_at_str: str) -> float:
 def _classify_snapshot_state(info: dict) -> str:
     """
     pending エントリ1件の状態を返す。
-      completed    : bd_status == "ready" または "recovered"（正常完了）
-      failed       : bd_status == "failed"
-      running      : trigger 後 STALE_WARNING_MIN 分以内
-      stale        : STALE_WARNING_MIN 分超〜STALE_ABORT_MIN 分
-      stale_abort  : STALE_ABORT_MIN 分超（異常扱い）
-      not_triggered: snapshot_id がない
+      active_running     : trigger 後 STALE_RUNNING_MIN 分未満（同時実行数へカウント）
+      stale_running      : STALE_RUNNING_MIN 分超〜ABANDONED_MIN 分（監視継続・カウントしない）
+      abandoned_candidate: ABANDONED_MIN 分超（要確認・カウントしない）
+      completed          : bd_status == "ready" または "recovered"
+      failed             : bd_status == "failed" / "canceled"
+      not_triggered      : snapshot_id がない
     """
     sid = info.get("snapshot_id", "")
     bd_status = info.get("bd_status", "")
@@ -817,25 +821,28 @@ def _classify_snapshot_state(info: dict) -> str:
         return "not_triggered"
     if bd_status in ("ready", "recovered"):
         return "completed"
-    if bd_status == "failed":
+    if bd_status in ("failed", "canceled"):
         return "failed"
 
     age = _snapshot_age_minutes(info.get("triggered_at", ""))
     if age < 0:
-        return "running"
-    if age > STALE_ABORT_MIN:
-        return "stale_abort"
-    if age > STALE_WARNING_MIN:
-        return "stale"
-    return "running"
+        return "active_running"  # パース失敗時は active 扱い
+    if age >= ABANDONED_MIN:
+        return "abandoned_candidate"
+    if age >= STALE_RUNNING_MIN:
+        return "stale_running"
+    return "active_running"
 
 
 def _count_active_snapshots(pending: dict) -> dict:
     """
     pending の各エントリを状態別にカウントする。
-    戻り値: {"running": N, "stale": N, "stale_abort": N, "completed": N, "failed": N}
+    戻り値のキー: active_running / stale_running / abandoned_candidate / completed / failed
     """
-    counts: dict[str, int] = {"running": 0, "stale": 0, "stale_abort": 0, "completed": 0, "failed": 0}
+    counts: dict[str, int] = {
+        "active_running": 0, "stale_running": 0, "abandoned_candidate": 0,
+        "completed": 0, "failed": 0,
+    }
     for info in pending.values():
         state = _classify_snapshot_state(info)
         if state in counts:
@@ -846,17 +853,16 @@ def _count_active_snapshots(pending: dict) -> dict:
 def _check_trigger_allowed(pending: dict) -> tuple[bool, str]:
     """
     新規 trigger を許可するかどうかを判定する。
+    active_running のみカウント対象。stale/abandoned はカウントしない。
     戻り値: (allowed: bool, reason: str)
     """
     counts = _count_active_snapshots(pending)
-    active = counts["running"] + counts["stale"] + counts["stale_abort"]
+    active = counts["active_running"]
 
-    if active >= MAX_RUNNING_TO_TRIGGER:
+    if active >= MAX_ACTIVE_TO_BLOCK:
         reason = (
-            f"⚠️  Bright Data 障害の疑い: {active}件の snapshot が running/stale のまま完了していません。\n"
-            f"   (running={counts['running']} stale={counts['stale']} stale_abort={counts['stale_abort']})\n"
-            f"   新規 trigger を停止し、Instagram取得なしモードで続行します。\n"
-            f"   Dashboard で各 snapshot の状態を確認してください:\n"
+            f"⚠️  Bright Data 障害の疑い: {active}件の snapshot が active_running のまま完了していません。\n"
+            f"   新規 trigger を停止します。Dashboard で各 snapshot の状態を確認してください:\n"
             f"   https://brightdata.com/cp/datasets"
         )
         return False, reason
@@ -864,23 +870,23 @@ def _check_trigger_allowed(pending: dict) -> tuple[bool, str]:
 
 
 def _print_pending_health(pending: dict) -> None:
-    """pending_snapshots.json の健全性を表示する。"""
+    """pending_snapshots.json の健全性をコンパクトに表示する。"""
     if not pending:
         return
     counts = _count_active_snapshots(pending)
     total = len(pending)
     real = sum(1 for v in pending.values() if v.get("snapshot_id", "").startswith("sd_"))
     print(f"  pending_snapshots: 合計{total}件 (実 snapshot: {real}件)")
+    labels = {
+        "active_running":      "  active_running（2時間未満）",
+        "stale_running":       "⚠️  stale_running（2〜6時間・スロット非占有）",
+        "abandoned_candidate": "❌ abandoned_candidate（6時間超・要確認）",
+        "completed":           "  completed（回収済み）",
+        "failed":              "❌ failed",
+    }
     for state, cnt in counts.items():
         if cnt:
-            label = {
-                "running":     "  running（正常）",
-                "stale":       "⚠️  stale (30分超)",
-                "stale_abort": "❌ stale_abort (2時間超・異常)",
-                "completed":   "  completed",
-                "failed":      "❌ failed",
-            }.get(state, state)
-            print(f"    {label}: {cnt}件")
+            print(f"    {labels.get(state, state)}: {cnt}件")
 
 
 def _save_pending_snapshots(snapshots: dict) -> None:
@@ -1323,15 +1329,18 @@ def _print_batch_fetch_summary(
     failed_accounts: list,
     category: str,
     pending_next_run: list | None = None,
+    running_jobs_ref: dict | None = None,
 ) -> None:
     """
-    全バッチ完了後にアカウント別・バッチ別の取得結果サマリーを表示する。
-    【2026-07-20追加】
-    pending_next_run: タイムアウトにより次回自動回収するアカウントリスト（失敗扱いしない）
+    全バッチ完了後にアカウント別・バッチ別の取得結果サマリーを6カテゴリで表示する。
+    6カテゴリ: ready回収 / active running / stale running / abandoned candidate /
+               failed / 未実行キュー（新規trigger）
     """
     if pending_next_run is None:
         pending_next_run = []
-    # アカウント別取得件数
+    if running_jobs_ref is None:
+        running_jobs_ref = {}
+
     account_counts: dict[str, int] = {}
     for p in posts:
         if p.get("fetch_error"):
@@ -1340,7 +1349,6 @@ def _print_batch_fetch_summary(
         if acct:
             account_counts[acct] = account_counts.get(acct, 0) + 1
 
-    # バッチ別取得件数
     batch_post_counts: dict[str, int] = {}
     for meta in snapshot_meta:
         batch_accounts = [a.lower() for a in meta.get("accounts", [])]
@@ -1350,67 +1358,116 @@ def _print_batch_fetch_summary(
     failed_set = {a.lower() for a in failed_accounts}
     pending_set = {a.lower() for a in pending_next_run}
 
+    # running_jobs から stale/abandoned を抽出（表示用）
+    stale_keys: set[str] = {
+        k for k, j in running_jobs_ref.items()
+        if not j.get("is_active") and not j.get("abandoned")
+    }
+    abandoned_keys: set[str] = {
+        k for k, j in running_jobs_ref.items() if j.get("abandoned")
+    }
+
     print()
     print("=" * 60)
-    print("【取得結果サマリー】")
+    print("【取得結果サマリー（6カテゴリ）】")
     print()
 
-    # ① アカウント別
-    all_batch_accounts = [u for batch in batches for u in batch]
-    print("  アカウント別取得件数:")
-    for acct in all_batch_accounts:
-        cnt = account_counts.get(acct.lower(), 0)
-        if acct.lower() in failed_set:
-            status = "失敗"
-        elif acct.lower() in pending_set:
-            status = "処理中・次回回収"
-        elif cnt == 0:
-            status = "0件"
-        else:
-            status = f"{cnt}件"
-        print(f"    {acct}: {status}")
+    # ① カテゴリ別バッチ一覧
+    ready_batches:     list[str] = []
+    active_batches:    list[str] = []
+    stale_batches:     list[str] = []
+    abandoned_batches: list[str] = []
+    failed_batches:    list[str] = []
+    untriggered_batches: list[str] = []
 
-    print()
+    meta_by_key = {m["batch_key"]: m for m in snapshot_meta}
+    all_batch_accounts_flat: list[str] = []
 
-    # ② バッチ別
-    print("  バッチ別結果:")
-    for bi, (meta, batch) in enumerate(zip(snapshot_meta, batches), 1):
-        bd_status = meta.get("bd_status", "")
+    for batch in batches:
         acct_names = ", ".join(batch)
-        batch_key = "|".join(sorted(batch))
-        cnt = batch_post_counts.get(batch_key, 0)
-        if bd_status == "ready":
-            status_label = "成功"
-        elif bd_status == "running":
-            status_label = "処理中・次回回収"
-        else:
-            status_label = bd_status
-        print(f"    バッチ{bi}/{len(batches)} [{status_label}] {acct_names} → {cnt}件")
+        bkey = "|".join(sorted(batch))
+        all_batch_accounts_flat.extend(batch)
+        cnt = batch_post_counts.get(bkey, 0)
+        meta = meta_by_key.get(bkey)
 
-    # キューに積まれたまま未実行のバッチ
-    if len(snapshot_meta) < len(batches):
-        for bi in range(len(snapshot_meta) + 1, len(batches) + 1):
-            print(f"    バッチ{bi}/{len(batches)} [次回回収] (タイムアウトにより未実行)")
+        if meta:
+            bd_status = meta.get("bd_status", "")
+            if bd_status in ("ready",) and cnt >= 0:
+                ready_batches.append(f"{acct_names} → {cnt}件回収")
+            elif bd_status == "running" and bkey in stale_keys:
+                age_str = ""
+                j = running_jobs_ref.get(bkey, {})
+                age_min = _snapshot_age_minutes(j.get("triggered_at_iso", ""))
+                if age_min >= 0:
+                    age_str = f" ({age_min:.0f}分経過)"
+                stale_batches.append(f"{acct_names}{age_str}")
+            elif bd_status == "running" and bkey in abandoned_keys:
+                j = running_jobs_ref.get(bkey, {})
+                age_min = _snapshot_age_minutes(j.get("triggered_at_iso", ""))
+                age_str = f" ({age_min:.0f}分経過)" if age_min >= 0 else ""
+                abandoned_batches.append(f"{acct_names}{age_str}")
+            elif bd_status == "running":
+                j = running_jobs_ref.get(bkey, {})
+                age_min = _snapshot_age_minutes(j.get("triggered_at_iso", ""))
+                age_str = f" ({age_min:.0f}分経過)" if age_min >= 0 else ""
+                active_batches.append(f"{acct_names}{age_str}")
+            elif bd_status in ("trigger_failed", "error", "failed"):
+                failed_batches.append(f"{acct_names} [{bd_status}]")
+        else:
+            # snapshot_meta にない = 未実行キュー
+            untriggered_batches.append(acct_names)
+
+    if ready_batches:
+        print(f"  ✅ ready 回収 ({len(ready_batches)}件):")
+        for s in ready_batches:
+            print(f"      {s}")
+    if active_batches:
+        print(f"  ⏳ active running ({len(active_batches)}件・スロット占有):")
+        for s in active_batches:
+            print(f"      {s}")
+    if stale_batches:
+        print(f"  ⚠️  stale running ({len(stale_batches)}件・スロット非占有・監視中):")
+        for s in stale_batches:
+            print(f"      {s}")
+    if abandoned_batches:
+        print(f"  ❌ abandoned candidate ({len(abandoned_batches)}件・要確認):")
+        for s in abandoned_batches:
+            print(f"      {s}")
+        print(f"     → python3 main.py --cleanup-stale で確認・移動")
+        print(f"     → python3 main.py --retry-stale で明示的再trigger")
+    if failed_batches:
+        print(f"  ❌ failed ({len(failed_batches)}件):")
+        for s in failed_batches:
+            print(f"      {s}")
+    if untriggered_batches:
+        print(f"  📋 未実行キュー ({len(untriggered_batches)}件・タイムアウトまたはキュー未到達):")
+        for s in untriggered_batches:
+            print(f"      {s}")
 
     print()
 
-    # ③ 集計
-    completed = sum(1 for m in snapshot_meta if m.get("bd_status") in ("ready", "recovered"))
-    truly_failed = sum(1 for m in snapshot_meta if m.get("bd_status") not in ("ready", "recovered", "running"))
-    pending_count = sum(1 for m in snapshot_meta if m.get("bd_status") == "running")
-    skipped = len(batches) - len(snapshot_meta)
+    # ② 集計
+    ready_count  = len(ready_batches)
+    active_count = len(active_batches)
+    stale_count  = len(stale_batches)
+    aband_count  = len(abandoned_batches)
+    fail_count   = len(failed_batches)
+    skip_count   = len(untriggered_batches)
+    print(f"  ready回収:          {ready_count}件")
+    print(f"  active running:     {active_count}件  ← 次回ポーリング継続")
+    print(f"  stale running:      {stale_count}件   ← 2時間超・スロット非占有")
+    print(f"  abandoned candidate:{aband_count}件   ← 6時間超・要確認")
+    print(f"  failed:             {fail_count}件")
+    print(f"  未実行キュー:       {skip_count}件")
+    print()
+
     succeeded_accounts = len(
-        {a.lower() for a in all_batch_accounts if a.lower() not in failed_set and a.lower() not in pending_set and account_counts.get(a.lower(), 0) > 0}
+        {a.lower() for a in all_batch_accounts_flat
+         if a.lower() not in failed_set and a.lower() not in pending_set
+         and account_counts.get(a.lower(), 0) > 0}
     )
-    print(f"  完了バッチ: {completed}/{len(batches)}件")
-    if truly_failed:
-        print(f"  失敗バッチ: {truly_failed}件 (Bright Data APIエラー)")
-    if pending_count or skipped:
-        print(f"  次回回収:   {pending_count + skipped}件 (処理中タイムアウト)")
-    print(f"  取得成功アカウント: {succeeded_accounts}/{len(all_batch_accounts)}件")
-    if pending_next_run:
-        print(f"  次回回収アカウント: {len(pending_next_run)}件")
-    print(f"  取得投稿合計: {len([p for p in posts if not p.get('fetch_error')])}件")
+    print(f"  取得成功アカウント: {succeeded_accounts}/{len(all_batch_accounts_flat)}件")
+    print(f"  取得投稿合計:       {len([p for p in posts if not p.get('fetch_error')])}件")
 
     # account_health 更新
     for acct in all_batch_accounts:
@@ -1566,54 +1623,132 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
     print()
     print(f"  ─ フェーズ1: キュー方式trigger (最大{BRIGHT_DATA_MAX_CONCURRENT}同時実行) ─")
 
-    # まず pending にある前回ジョブを確認して running_jobs に追加し、
-    # 新規triggerが必要なバッチはキューに積む
+    # まず pending にある前回ジョブをAPI再確認して running_jobs に追加し、
+    # 新規triggerが必要なバッチはキューに積む。
+    # active_running (< 2hr) → running_jobs (is_active=True) → 同時実行数へカウント
+    # stale_running (2-6hr)  → running_jobs (is_active=False) → ポーリング継続・カウントしない
+    # abandoned (> 6hr)      → running_jobs (is_active=False, abandoned=True) → 要確認
+    # ready     → 即ダウンロード → pending 削除
+    # failed    → pending 削除 → 再trigger
+    stale_accounts: set[str] = set()  # stale/abandoned対象アカウント（再trigger防止）
+
     for batch_index, batch_usernames in enumerate(batches, start=1):
         batch_key = "|".join(sorted(batch_usernames))
 
         if batch_key in pending:
-            pending_sid = pending[batch_key].get("snapshot_id")
-            triggered_at_str = pending[batch_key].get("triggered_at", "")
-            pending_stale = False
-            if triggered_at_str:
-                try:
-                    triggered_dt = dt.datetime.fromisoformat(triggered_at_str.replace("Z", "+00:00"))
-                    age_hours = (now - triggered_dt).total_seconds() / 3600
-                    if age_hours > 20:
-                        print(
-                            f"  バッチ{batch_index}: pending snapshot_id={pending_sid} は"
-                            f" {age_hours:.1f}時間前のものです（20時間超 → 新規triggerに切り替え）"
-                        )
-                        pending_stale = True
-                        del updated_pending[batch_key]
-                except Exception:
-                    pass
-            if not pending_stale:
-                status, _status_detail = _check_snapshot_status(pending_sid)
-                dashboard_url = BD_SNAPSHOT_DASHBOARD_URL.format(snapshot_id=pending_sid)
-                state = _classify_snapshot_state({**pending[batch_key], "bd_status": status})
-                print(
-                    f"  バッチ{batch_index}/{len(batches)}: "
-                    f"前回pending snapshot_id={pending_sid} → status={status} [{state}]"
-                )
-                print(f"    Dashboard: {dashboard_url}")
-                if _status_detail.get("error_message"):
-                    print(f"    ⚠️  error: {_status_detail['error_message']}")
-                if status in ("ready", "running"):
-                    running_jobs[batch_key] = {
-                        "snapshot_id":      pending_sid,
-                        "accounts":         batch_usernames,
-                        "batch_index":      batch_index,
-                        "recovered":        status == "ready",
-                        "triggered_at_iso": pending[batch_key].get("triggered_at", ""),
-                    }
-                    continue
-                elif status == "failed":
-                    del updated_pending[batch_key]
-                    # fallthrough → キューに積む
+            pending_info = pending[batch_key]
+            pending_sid = pending_info.get("snapshot_id")
+            triggered_at_str = pending_info.get("triggered_at", "")
+
+            # API で現在ステータスを確認
+            status, _status_detail = _check_snapshot_status(pending_sid)
+            dashboard_url = BD_SNAPSHOT_DASHBOARD_URL.format(snapshot_id=pending_sid)
+            state = _classify_snapshot_state({**pending_info, "bd_status": status})
+            age_min = _snapshot_age_minutes(triggered_at_str)
+            age_str = f"{age_min:.0f}分経過" if age_min >= 0 else ""
+
+            print(
+                f"  バッチ{batch_index}/{len(batches)}: "
+                f"pending snapshot_id={pending_sid} → API status={status} [{state}] {age_str}"
+            )
+            print(f"    Dashboard: {dashboard_url}")
+            if _status_detail.get("error_message"):
+                print(f"    ⚠️  error: {_status_detail['error_message']}")
+
+            # last_checked_at を更新
+            updated_pending[batch_key] = {**pending_info, "last_checked_at": now.isoformat()}
+
+            if status == "ready":
+                # 即ダウンロードして結果統合
+                print(f"  バッチ{batch_index}: ready確認 → ダウンロード開始")
+                ok, items, _ = _download_snapshot(pending_sid)
+                del updated_pending[batch_key]
+                _save_pending_snapshots(updated_pending)
+                if ok:
+                    for item in items:
+                        owner_username = _get_first(item, ["user_posted"], "") or ""
+                        posts.append(_normalize_post(item, source_account=owner_username, category=category))
+                    snapshot_meta.append({
+                        "batch_key": batch_key, "snapshot_id": pending_sid,
+                        "bd_status": "ready", "error_msg": "", "accounts": batch_usernames,
+                        "recovered": True, "recovered_count": len(items),
+                    })
+                    print(f"  バッチ{batch_index}: ready回収 {len(items)}件")
                 else:
-                    del updated_pending[batch_key]
-                    # fallthrough → キューに積む
+                    failed_accounts.extend(batch_usernames)
+                    snapshot_meta.append({
+                        "batch_key": batch_key, "snapshot_id": pending_sid,
+                        "bd_status": "error", "error_msg": "download失敗",
+                        "accounts": batch_usernames, "recovered": True,
+                    })
+                continue  # 新規trigger不要
+
+            elif status in ("failed", "canceled"):
+                print(f"  バッチ{batch_index}: {status} → pending削除 → 再trigger候補へ")
+                del updated_pending[batch_key]
+                _save_pending_snapshots(updated_pending)
+                # fallthrough → キューに積む
+
+            elif state == "active_running":
+                # < 2時間: 通常running → 同時実行数へカウント
+                running_jobs[batch_key] = {
+                    "snapshot_id":      pending_sid,
+                    "accounts":         batch_usernames,
+                    "batch_index":      batch_index,
+                    "recovered":        False,
+                    "triggered_at_iso": triggered_at_str,
+                    "is_active":        True,
+                }
+                continue
+
+            elif state == "stale_running":
+                # 2〜6時間: 監視継続・同時実行数へカウントしない
+                print(f"  バッチ{batch_index}: stale_running → スロット非占有・ポーリング継続")
+                if updated_pending[batch_key].get("stale_since") is None:
+                    updated_pending[batch_key]["stale_since"] = now.isoformat()
+                    _save_pending_snapshots(updated_pending)
+                running_jobs[batch_key] = {
+                    "snapshot_id":      pending_sid,
+                    "accounts":         batch_usernames,
+                    "batch_index":      batch_index,
+                    "recovered":        False,
+                    "triggered_at_iso": triggered_at_str,
+                    "is_active":        False,  # スロット非占有
+                }
+                stale_accounts.update(u.lower() for u in batch_usernames)
+                continue
+
+            elif state == "abandoned_candidate":
+                # 6時間超: 要確認・カウントしない・自動再triggerしない
+                print(f"  バッチ{batch_index}: abandoned_candidate ({age_str}) → 要確認一覧へ")
+                if "abandoned_reason" not in updated_pending[batch_key] or not updated_pending[batch_key]["abandoned_reason"]:
+                    updated_pending[batch_key]["abandoned_reason"] = f"{age_min:.0f}分経過・API status=running"
+                    _save_pending_snapshots(updated_pending)
+                running_jobs[batch_key] = {
+                    "snapshot_id":      pending_sid,
+                    "accounts":         batch_usernames,
+                    "batch_index":      batch_index,
+                    "recovered":        False,
+                    "triggered_at_iso": triggered_at_str,
+                    "is_active":        False,
+                    "abandoned":        True,
+                }
+                stale_accounts.update(u.lower() for u in batch_usernames)
+                continue
+
+            else:
+                # unknown / error → pending削除 → 再trigger
+                del updated_pending[batch_key]
+                _save_pending_snapshots(updated_pending)
+
+        # stale/abandoned対象アカウントを含むバッチは通常trigger除外
+        stale_in_batch = [u for u in batch_usernames if u.lower() in stale_accounts]
+        if stale_in_batch:
+            print(
+                f"  バッチ{batch_index}: stale対象アカウント含む → trigger除外"
+                f" ({', '.join(stale_in_batch)})"
+            )
+            continue
 
         # 新規triggerが必要なバッチをキューに積む
         trigger_queue.append(batch_index - 1)  # 0-indexed
@@ -1660,10 +1795,15 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             print(f"  バッチ{batch_index}: snapshot_id={snapshot_id} → ポーリング待機へ")
             print(f"    Dashboard: {dashboard_url}")
             updated_pending[batch_key] = {
-                "snapshot_id":  snapshot_id,
-                "accounts":     batch_usernames,
-                "triggered_at": now.isoformat(),
-                "bd_status":    "running",
+                "snapshot_id":     snapshot_id,
+                "accounts":        batch_usernames,
+                "triggered_at":    now.isoformat(),
+                "bd_status":       "running",
+                "last_checked_at": now.isoformat(),
+                "stale_since":     None,
+                "retry_count":     updated_pending.get(batch_key, {}).get("retry_count", 0),
+                "source_version":  "v2",
+                "abandoned_reason": "",
             }
             _save_pending_snapshots(updated_pending)
         else:
@@ -1675,15 +1815,26 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
             "batch_index":      batch_index,
             "recovered":        False,
             "triggered_at_iso": now.isoformat(),
+            "is_active":        True,  # 新規triggerは常にactive
         }
         return True
 
-    # pending から復元したジョブが既にあるので、空きスロット分だけ新規triggerする
-    while trigger_queue and len(running_jobs) < BRIGHT_DATA_MAX_CONCURRENT:
+    def _active_slot_count(jobs: dict) -> int:
+        """running_jobs / remaining_jobs の中で active_running カウントのみ返す。"""
+        return sum(1 for j in jobs.values() if j.get("is_active", True))
+
+    # pending から復元したジョブが既にあるので、active スロット空き分だけ新規triggerする
+    while trigger_queue and _active_slot_count(running_jobs) < BRIGHT_DATA_MAX_CONCURRENT:
         idx = trigger_queue.pop(0)
         _trigger_one_batch(idx)
 
-    print(f"  ─ フェーズ1完了: {len(running_jobs)}バッチtrigger済, キュー残{len(trigger_queue)}件 ─")
+    active_cnt = _active_slot_count(running_jobs)
+    stale_cnt  = sum(1 for j in running_jobs.values() if not j.get("is_active") and not j.get("abandoned"))
+    aband_cnt  = sum(1 for j in running_jobs.values() if j.get("abandoned"))
+    print(
+        f"  ─ フェーズ1完了: 全{len(running_jobs)}バッチ監視中 "
+        f"(active={active_cnt} stale={stale_cnt} abandoned={aband_cnt} キュー残={len(trigger_queue)}) ─"
+    )
     print()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1837,16 +1988,16 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
         for bkey in completed_this_round:
             del remaining_jobs[bkey]
 
-        # 完了したスロット分だけキューから次のバッチをtrigger
-        # ※ running_jobs は増えるだけのリスト。実際の稼働数は remaining_jobs で数える。
-        while trigger_queue and len(remaining_jobs) < BRIGHT_DATA_MAX_CONCURRENT:
+        # active スロットが空いたらキューから次のバッチをtrigger
+        # stale/abandoned は is_active=False なのでスロット計算から除外される
+        while trigger_queue and _active_slot_count(remaining_jobs) < BRIGHT_DATA_MAX_CONCURRENT:
             idx = trigger_queue.pop(0)
             if _trigger_one_batch(idx):
                 bkey_new = "|".join(sorted(batches[idx]))
                 remaining_jobs[bkey_new] = running_jobs[bkey_new]
                 print(
-                    f"  [キュー] スロット空き → バッチ{idx+1}/{len(batches)} trigger"
-                    f" ({len(remaining_jobs)}/{BRIGHT_DATA_MAX_CONCURRENT}稼働中,"
+                    f"  [キュー] active スロット空き → バッチ{idx+1}/{len(batches)} 新規trigger"
+                    f" (active={_active_slot_count(remaining_jobs)}/{BRIGHT_DATA_MAX_CONCURRENT},"
                     f" キュー残{len(trigger_queue)}件)"
                 )
 
@@ -1875,7 +2026,10 @@ def _fetch_posts_for_accounts(accounts: list, category: str, results_limit: int)
         )
 
     # ── バッチ完了サマリー ────────────────────────────────────────────────────
-    _print_batch_fetch_summary(posts, snapshot_meta, batches, failed_accounts, category, pending_next_run)
+    _print_batch_fetch_summary(
+        posts, snapshot_meta, batches, failed_accounts, category,
+        pending_next_run, running_jobs_ref=running_jobs,
+    )
 
     # ── Instagram取得品質レポート ────────────────────────────────────────────
     quality = print_instagram_fetch_quality_report(posts, usernames, category)
@@ -2146,3 +2300,264 @@ def build_post_pool(posts: list) -> dict:
     stats["pool_count"] = len(pool)
 
     return {"pool": pool, "stats": stats}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI 公開関数（main.py から呼ぶ）
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_pending_status() -> None:
+    """
+    --pending-status: pending一覧をAPI確認して表示する。
+    投稿生成なし・新規triggerなし。
+    """
+    pending = _load_pending_snapshots()
+    if not pending:
+        print("pending_snapshots.json に未完了ジョブはありません。")
+        return
+
+    now = dt.datetime.now(dt.timezone.utc)
+    print()
+    print("=" * 65)
+    print("【pending スナップショット状態確認】")
+    print(f"  確認日時: {now.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"  合計: {len(pending)}件")
+    print("=" * 65)
+
+    categories: dict[str, list[dict]] = {
+        "completed":           [],  # API status = ready（ダウンロード可能）
+        "active_running":      [],
+        "stale_running":       [],
+        "abandoned_candidate": [],
+        "failed":              [],
+        "not_triggered":       [],
+        "other":               [],
+    }
+
+    for bkey, info in pending.items():
+        sid = info.get("snapshot_id", "")
+        accounts = info.get("accounts", [])
+        triggered_at = info.get("triggered_at", "")
+        age_min = _snapshot_age_minutes(triggered_at)
+        age_str = f"{age_min:.0f}分" if age_min >= 0 else "不明"
+
+        api_status, detail = _check_snapshot_status(sid) if sid else ("no_sid", {})
+        state = _classify_snapshot_state({**info, "bd_status": api_status})
+        categories.get(state, categories["other"]).append({
+            "bkey": bkey, "sid": sid, "accounts": accounts,
+            "age_str": age_str, "api_status": api_status, "state": state,
+            "stale_since": info.get("stale_since"),
+            "abandoned_reason": info.get("abandoned_reason", ""),
+            "error": detail.get("error_message", ""),
+        })
+
+    labels = {
+        "completed":           "✅ completed / ready（次回実行で自動ダウンロード）",
+        "active_running":      "⏳ active_running（2時間未満・正常）",
+        "stale_running":       "⚠️  stale_running（2〜6時間・スロット非占有）",
+        "abandoned_candidate": "❌ abandoned_candidate（6時間超・要確認）",
+        "failed":              "❌ failed",
+        "not_triggered":       "📋 not_triggered",
+        "other":               "❓ その他",
+    }
+    for state, entries in categories.items():
+        if not entries:
+            continue
+        print(f"\n{labels.get(state, state)} ({len(entries)}件):")
+        for e in entries:
+            print(f"  snapshot_id : {e['sid']}")
+            print(f"  accounts    : {', '.join(e['accounts'])}")
+            print(f"   経過時間   : {e['age_str']}")
+            if e.get("stale_since"):
+                print(f"  stale_since : {e['stale_since']}")
+            if e.get("abandoned_reason"):
+                print(f"  abandoned理由: {e['abandoned_reason']}")
+            if e.get("error"):
+                print(f"  APIエラー  : {e['error']}")
+            dashboard = BD_SNAPSHOT_DASHBOARD_URL.format(snapshot_id=e["sid"])
+            print(f"  Dashboard  : {dashboard}")
+            print()
+    print("=" * 65)
+    print("  ヒント:")
+    print("  python3 main.py --cleanup-stale  : 6時間超をarchiveへ移動")
+    print("  python3 main.py --retry-stale    : 6時間超のみ明示的に再trigger")
+    print("=" * 65)
+
+
+def run_cleanup_stale() -> None:
+    """
+    --cleanup-stale: 6時間以上 running のエントリを abandoned_snapshots.json へ移動。
+    自動再triggerなし。pending から完全削除せず archive に保存。
+    """
+    pending = _load_pending_snapshots()
+    if not pending:
+        print("pending_snapshots.json に未完了ジョブはありません。")
+        return
+
+    # 既存の archive を読み込む
+    try:
+        if os.path.exists(ABANDONED_ARCHIVE_PATH):
+            with open(ABANDONED_ARCHIVE_PATH, "r", encoding="utf-8") as f:
+                archive = json.load(f)
+        else:
+            archive = {}
+    except Exception:
+        archive = {}
+
+    now = dt.datetime.now(dt.timezone.utc)
+    moved: list[str] = []
+    kept: dict = {}
+
+    for bkey, info in pending.items():
+        sid = info.get("snapshot_id", "")
+        state = _classify_snapshot_state(info)
+        if state == "abandoned_candidate":
+            archive_entry = {
+                **info,
+                "archived_at": now.isoformat(),
+                "archive_reason": "6時間超のrunning → --cleanup-stale で移動",
+            }
+            archive[bkey] = archive_entry
+            moved.append(f"{bkey} (snapshot_id={sid})")
+        else:
+            kept[bkey] = info
+
+    if not moved:
+        print("6時間以上 running のエントリはありません（cleanup不要）。")
+        return
+
+    # archive 保存
+    os.makedirs(RUNTIME_STATE_DIR, exist_ok=True)
+    tmp = ABANDONED_ARCHIVE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(archive, f, ensure_ascii=False, indent=2, default=str)
+    os.replace(tmp, ABANDONED_ARCHIVE_PATH)
+
+    # pending を更新（移動したものを除外）
+    _save_pending_snapshots(kept)
+
+    print()
+    print(f"【cleanup-stale 完了】{len(moved)}件を abandoned_snapshots.json へ移動:")
+    for m in moved:
+        print(f"  {m}")
+    print(f"残り pending: {len(kept)}件")
+    print(f"archive保存先: {ABANDONED_ARCHIVE_PATH}")
+
+
+def run_retry_stale(dry_run: bool = False) -> None:
+    """
+    --retry-stale: 6時間以上 running のエントリのみ明示的に再trigger。
+    旧 snapshot_id は abandoned 扱いで archive に保存する。
+    同じ実行内で二重 trigger しない。
+    """
+    pending = _load_pending_snapshots()
+    if not pending:
+        print("pending_snapshots.json に未完了ジョブはありません。")
+        return
+
+    try:
+        if os.path.exists(ABANDONED_ARCHIVE_PATH):
+            with open(ABANDONED_ARCHIVE_PATH, "r", encoding="utf-8") as f:
+                archive = json.load(f)
+        else:
+            archive = {}
+    except Exception:
+        archive = {}
+
+    now = dt.datetime.now(dt.timezone.utc)
+    retry_targets: list[tuple[str, dict]] = []
+    keep_as_is: dict = {}
+
+    for bkey, info in pending.items():
+        state = _classify_snapshot_state(info)
+        if state == "abandoned_candidate":
+            retry_targets.append((bkey, info))
+        else:
+            keep_as_is[bkey] = info
+
+    if not retry_targets:
+        print("6時間以上 running のエントリはありません（--retry-stale 対象なし）。")
+        return
+
+    print()
+    print(f"【retry-stale】{len(retry_targets)}件の abandoned_candidate を再trigger対象:")
+    for bkey, info in retry_targets:
+        accounts = info.get("accounts", [])
+        age_min = _snapshot_age_minutes(info.get("triggered_at", ""))
+        print(f"  {bkey} ({age_min:.0f}分経過) accounts={accounts}")
+
+    if dry_run:
+        print("[ドライラン] 実際の trigger は行いません。")
+        return
+
+    new_pending = dict(keep_as_is)
+
+    # 日時情報
+    now_ref = dt.datetime.now(dt.timezone.utc)
+    cutoff = now_ref - dt.timedelta(days=RECENT_DAYS)
+    start_date = cutoff.strftime("%m-%d-%Y")
+    end_date = now_ref.strftime("%m-%d-%Y")
+
+    retriggered: list[str] = []
+    trigger_set: set[str] = set()  # 同一実行内二重 trigger 防止
+
+    for bkey, old_info in retry_targets:
+        accounts = old_info.get("accounts", [])
+        if not accounts:
+            continue
+        if bkey in trigger_set:
+            print(f"  {bkey}: 同一実行内で既に trigger 済み → スキップ")
+            continue
+
+        # 旧 snapshot を archive に移す
+        archive[bkey + f"__abandoned_{now.strftime('%Y%m%dT%H%M%S')}"] = {
+            **old_info,
+            "archived_at": now.isoformat(),
+            "archive_reason": f"--retry-stale: abandoned後に再trigger",
+        }
+
+        input_list = [
+            {
+                "url": _to_profile_url(u),
+                "num_of_posts": DEFAULT_RESULTS_PER_ACCOUNT,
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+            for u in accounts
+        ]
+        snapshot_id, bd_status, trigger_error = _trigger_batch(input_list)
+
+        if snapshot_id:
+            new_pending[bkey] = {
+                "snapshot_id":      snapshot_id,
+                "accounts":         accounts,
+                "triggered_at":     now.isoformat(),
+                "bd_status":        "running",
+                "last_checked_at":  now.isoformat(),
+                "stale_since":      None,
+                "retry_count":      old_info.get("retry_count", 0) + 1,
+                "source_version":   "v2",
+                "abandoned_reason": "",
+            }
+            trigger_set.add(bkey)
+            retriggered.append(f"{bkey} → {snapshot_id}")
+            print(f"  再trigger成功: {bkey} → snapshot_id={snapshot_id}")
+        else:
+            err = trigger_error.get("error_message", "")
+            print(f"  再trigger失敗: {bkey} ({err})")
+            new_pending[bkey] = old_info  # 元のエントリを保持
+
+    # archive・pending 保存
+    os.makedirs(RUNTIME_STATE_DIR, exist_ok=True)
+    tmp_arch = ABANDONED_ARCHIVE_PATH + ".tmp"
+    with open(tmp_arch, "w", encoding="utf-8") as f:
+        json.dump(archive, f, ensure_ascii=False, indent=2, default=str)
+    os.replace(tmp_arch, ABANDONED_ARCHIVE_PATH)
+
+    _save_pending_snapshots(new_pending)
+
+    print()
+    print(f"【retry-stale 完了】再trigger: {len(retriggered)}件")
+    for r in retriggered:
+        print(f"  {r}")
+    print(f"pending 残り: {len(new_pending)}件（次回実行で自動回収）")

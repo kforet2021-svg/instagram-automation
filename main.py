@@ -1641,8 +1641,14 @@ if __name__ == "__main__":
                          help="APIを呼ばずプロンプトと保存先のみ表示")
     _parser.add_argument("--batch-size",  type=int, default=None, dest="batch_size",
                          help="1ジョブあたりのアカウント数を上書き (例: --batch-size 2)")
-    _parser.add_argument("--fallback",    action="store_true",
+    _parser.add_argument("--fallback",       action="store_true",
                          help="Instagram取得0件でも投稿生成を続行する（通常は使用しない）")
+    _parser.add_argument("--pending-status", action="store_true", dest="pending_status",
+                         help="pending一覧をAPI確認して表示（投稿生成・新規triggerなし）")
+    _parser.add_argument("--cleanup-stale",  action="store_true", dest="cleanup_stale",
+                         help="6時間以上runningのsnapshotをarchiveへ移動（自動再triggerなし）")
+    _parser.add_argument("--retry-stale",    action="store_true", dest="retry_stale",
+                         help="6時間以上runningのsnapshotのみ明示的に再trigger")
     _args, _unknown = _parser.parse_known_args()
 
     # dry-run フラグを creator_studio と bright_data_fetcher へ伝達
@@ -1660,6 +1666,26 @@ if __name__ == "__main__":
             print(f"[設定] バッチサイズを {_args.batch_size} アカウント/ジョブ に変更しました")
         else:
             print(f"[警告] --batch-size は 1〜10 の範囲で指定してください（指定値: {_args.batch_size}）")
+
+    # pending 系 CLI は投稿生成・AI分析を行わず単独実行
+    if _args.pending_status:
+        import bright_data_fetcher as _bdf_ps
+        _bdf_ps.run_pending_status()
+        import sys as _sys
+        _sys.exit(0)
+
+    if _args.cleanup_stale:
+        import bright_data_fetcher as _bdf_cs
+        _bdf_cs.run_cleanup_stale()
+        import sys as _sys
+        _sys.exit(0)
+
+    if _args.retry_stale:
+        import bright_data_fetcher as _bdf_rs
+        _bdf_rs.RETRY_STALE = True
+        _bdf_rs.run_retry_stale(dry_run=_args.dry_run)
+        import sys as _sys
+        _sys.exit(0)
 
     if _args.thumbnail:
         # ── サムネイル分析モード ──────────────────────────────────────────
