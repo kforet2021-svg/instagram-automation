@@ -1351,7 +1351,7 @@ def _ceo_review(cs_record: dict, pool_count: int, analyzed_count: int) -> None:
     print()
 
 
-def main() -> None:
+def main(fallback_mode: bool = False) -> None:
     try:
         validate_config()
     except EnvironmentError as e:
@@ -1415,23 +1415,49 @@ def main() -> None:
 
     # ── Bright Data 障害モード ─────────────────────────────────────────────
     if _bd_outage:
+        if not fallback_mode:
+            print()
+            print("=" * 70)
+            print("Instagramデータ取得失敗")
+            print()
+            print("  取得件数: 0")
+            print("  Research Candidate: 0")
+            print()
+            print("  本日の投稿生成は中止しました。")
+            print()
+            print("  理由:")
+            print("  Instagramの実データを取得できなかったため、")
+            print("  トレンドに基づく投稿は生成しません。")
+            print()
+            print(f"  ({_outage_reason})")
+            print()
+            print("  Bright Dataの復旧後に再実行してください。")
+            print("  ※ --fallback オプションを付けると取得なしで投稿生成できます。")
+            print("=" * 70)
+            _run_log_from_snapshot_meta(
+                snapshot_meta=snapshot_meta,
+                accounts=accounts,
+                fetched_count=0,
+                pool_count=0,
+                post_generated=False,
+                registered_count=len(list(ANTENNA_ACCOUNTS)),
+            )
+            sys.exit("NO_INSTAGRAM_DATA")
+
+        # --fallback 指定時のみ Instagram根拠なしで Creator Studio を実行
         print()
         print("=" * 70)
-        print("【Bright Data 障害モード】Instagram取得をスキップして続行します")
+        print("【--fallback モード】Bright Data 障害 — Instagram取得なしで続行します")
         print(_outage_reason)
-        print()
-        print("  Trend Analysis・Research Candidate Score はスキップします。")
-        print("  Creator Studio（投稿生成）はInstagram根拠なしで実行できます。")
         print("=" * 70)
         print()
-        # Instagram根拠なしで Creator Studio だけ実行
         try:
-            if _budget_ok("Creator Studio（障害モード）"):
+            if _budget_ok("Creator Studio（fallbackモード）"):
                 cs_result = generate_creator_studio_daily(instagram_fetched=0)
                 if cs_result:
                     print_creator_studio_summary(cs_result)
         except Exception as e:
-            print(f"Creator Studio（障害モード）実行中にエラーが発生しました: {e}")
+            print(f"Creator Studio（fallbackモード）実行中にエラーが発生しました: {e}")
         _run_log_from_snapshot_meta(
             snapshot_meta=snapshot_meta,
             accounts=accounts,
@@ -1441,7 +1467,7 @@ def main() -> None:
             registered_count=len(list(ANTENNA_ACCOUNTS)),
         )
         print()
-        print("すべての処理が完了しました（Bright Data 障害モード）")
+        print("すべての処理が完了しました（--fallback モード）")
         sys.exit(0)
 
     apply_beauty_category(raw_posts, ANTENNA_ACCOUNTS_BEAUTY)
@@ -1478,20 +1504,10 @@ def main() -> None:
         fetched_count = result["stats"].get("fetched", 0)
         pool_count = result["stats"].get("pool_count", 0)
 
-        # 2026-07-18: 0件時は明確なメッセージを出してトレンド分析をスキップ
-        print()
-        print("=" * 60)
         if fetched_count == 0:
-            print("【データ不足】Instagramデータを取得できていないため、トレンド分析は実行できません")
-            print("  原因: Bright Dataの取得件数が0件です（タイムアウト・API障害の可能性）")
-            print("  次回実行時にpending_snapshots.jsonの再確認を行います")
             no_data_reason = "Bright Data取得0件（タイムアウト・API障害の可能性）"
         else:
-            print("【データ不足】フィルタ後にプール対象の投稿が0件のため、トレンド分析は実行できません")
-            print(f"  取得: {fetched_count}件 → フィルタ後: 0件（リール以外・投稿日が古いなど）")
             no_data_reason = f"取得{fetched_count}件だがフィルタ後0件（リール以外・投稿日が古いなど）"
-        print("=" * 60)
-        print()
 
         # スプレッドシートに0件ステータスを保存
         try:
@@ -1508,12 +1524,41 @@ def main() -> None:
             post_generated=False,
             registered_count=len(list(ANTENNA_ACCOUNTS)),
         )
-        # 回収完了バッチがあればその行も追記
         _run_log_recovered(snapshot_meta)
+
+        if fetched_count == 0 and not fallback_mode:
+            # Research Candidate 0件 → 投稿生成を中止
+            print()
+            print("=" * 70)
+            print("Instagramデータ取得失敗")
+            print()
+            print("  取得件数: 0")
+            print("  Research Candidate: 0")
+            print()
+            print("  本日の投稿生成は中止しました。")
+            print()
+            print("  理由:")
+            print("  Instagramの実データを取得できなかったため、")
+            print("  トレンドに基づく投稿は生成しません。")
+            print()
+            print("  Bright Dataの復旧後に再実行してください。")
+            print("  ※ --fallback オプションを付けると取得なしで投稿生成できます。")
+            print("=" * 70)
+            sys.exit("NO_INSTAGRAM_DATA")
+
+        # fetched_count > 0 だがフィルタ後0件、または --fallback 指定時はそのまま続行
+        print()
+        print("=" * 60)
+        if fetched_count == 0:
+            print("【--fallback モード】Instagramデータ取得0件 — fallbackで続行します")
+        else:
+            print("【データ不足】フィルタ後にプール対象の投稿が0件のため、トレンド分析は実行できません")
+            print(f"  取得: {fetched_count}件 → フィルタ後: 0件（リール以外・投稿日が古いなど）")
+        print("=" * 60)
+        print()
 
         print("===== 取得・プールログ =====")
         _print_stats(CATEGORY_ALL, result["stats"])
-        # 2026-07-01: 投稿0件でもCreator Studioは実行する(昨日以前のデータを使う)
         phase1_result = {}
         try:
             phase1_result = generate_phase1_daily(instagram_fetched=fetched_count) or {}
@@ -1596,6 +1641,8 @@ if __name__ == "__main__":
                          help="APIを呼ばずプロンプトと保存先のみ表示")
     _parser.add_argument("--batch-size",  type=int, default=None, dest="batch_size",
                          help="1ジョブあたりのアカウント数を上書き (例: --batch-size 2)")
+    _parser.add_argument("--fallback",    action="store_true",
+                         help="Instagram取得0件でも投稿生成を続行する（通常は使用しない）")
     _args, _unknown = _parser.parse_known_args()
 
     # dry-run フラグを creator_studio と bright_data_fetcher へ伝達
@@ -1640,4 +1687,4 @@ if __name__ == "__main__":
             print(f"サムネイル分析エラー: {_e}")
             traceback.print_exc()
     else:
-        main()
+        main(fallback_mode=_args.fallback)
