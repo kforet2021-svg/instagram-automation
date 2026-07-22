@@ -361,5 +361,115 @@ class TestStaleSnapshotManagement(unittest.TestCase):
                         "abandoned_candidate のみ9件あっても trigger が許可されること")
 
 
+class TestBatchFetchSummaryNoNameError(unittest.TestCase):
+    """_print_batch_fetch_summary の NameError 回帰テスト"""
+
+    def setUp(self):
+        import bright_data_fetcher as bdf
+        self.bdf = bdf
+
+    def _make_post(self, account: str) -> dict:
+        return {
+            "source_account": account, "username": account,
+            "play_count": 1000, "followers": 5000,
+            "is_reel": True, "fetch_error": False,
+        }
+
+    def test_20_no_name_error_on_summary(self):
+        """_print_batch_fetch_summary が NameError を起こさないこと。"""
+        posts = [self._make_post("alice"), self._make_post("bob")]
+        snapshot_meta = [
+            {"batch_key": "alice|bob", "bd_status": "ready", "accounts": ["alice", "bob"],
+             "recovered": True, "recovered_count": 2},
+        ]
+        batches = [["alice", "bob"]]
+        failed_accounts: list = []
+
+        import io, contextlib
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                self.bdf._print_batch_fetch_summary(
+                    posts, snapshot_meta, batches, failed_accounts, "テスト"
+                )
+        except NameError as e:
+            self.fail(f"NameError が発生しました: {e}")
+
+    def test_21_active_and_queued_are_separate(self):
+        """active running と 未実行キューは別カテゴリで集計されること。"""
+        import io, contextlib
+        import datetime as _dt
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+        triggered_at = (now - _dt.timedelta(minutes=30)).isoformat()
+
+        # バッチ1: active running (snapshot_metaあり・running)
+        # バッチ2: 未実行キュー (snapshot_metaなし)
+        posts: list = []
+        snapshot_meta = [
+            {"batch_key": "acc_a|acc_b", "bd_status": "running",
+             "accounts": ["acc_a", "acc_b"], "recovered": False},
+        ]
+        batches = [["acc_a", "acc_b"], ["acc_c", "acc_d"]]
+        failed_accounts: list = []
+        running_jobs_ref = {
+            "acc_a|acc_b": {
+                "snapshot_id": "sd_x", "accounts": ["acc_a", "acc_b"],
+                "batch_index": 1, "recovered": False,
+                "triggered_at_iso": triggered_at, "is_active": True,
+            }
+        }
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.bdf._print_batch_fetch_summary(
+                posts, snapshot_meta, batches, failed_accounts, "テスト",
+                running_jobs_ref=running_jobs_ref,
+            )
+
+        output = buf.getvalue()
+        self.assertIn("active running", output, "active runningカテゴリが表示されること")
+        self.assertIn("未実行キュー", output, "未実行キューカテゴリが表示されること")
+        self.assertNotIn("処理中・次回回収", output,
+                         "active runningを「処理中・次回回収」と混在表示しないこと")
+
+    def test_22_recovered_posts_counted_in_total(self):
+        """ready回収投稿は取得投稿合計にカウントされること。"""
+        import io, contextlib
+
+        posts = [self._make_post(f"acc_{i}") for i in range(43)]
+        snapshot_meta = [
+            {"batch_key": "|".join(sorted([f"acc_{i}", f"acc_{i+1}"])),
+             "bd_status": "ready", "accounts": [f"acc_{i}", f"acc_{i+1}"],
+             "recovered": True, "recovered_count": 4}
+            for i in range(0, 10, 2)
+        ]
+        batches = [[f"acc_{i}", f"acc_{i+1}"] for i in range(0, 10, 2)]
+        failed_accounts: list = []
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.bdf._print_batch_fetch_summary(
+                posts, snapshot_meta, batches, failed_accounts, "テスト"
+            )
+
+        output = buf.getvalue()
+        self.assertIn("43件", output, "取得投稿合計43件が表示されること")
+
+    def test_23_no_all_batch_accounts_reference(self):
+        """ソースコード内に all_batch_accounts（flat 除く）の未定義参照が残っていないこと。"""
+        import re, os
+        src_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "bright_data_fetcher.py"
+        )
+        with open(src_path, encoding="utf-8") as f:
+            content = f.read()
+        # all_batch_accounts_flat は OK、all_batch_accounts 単体はNG
+        bad_refs = re.findall(r'\ball_batch_accounts\b(?!_flat)', content)
+        self.assertEqual(bad_refs, [],
+                         f"未定義変数 all_batch_accounts の参照が残っています: {bad_refs}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

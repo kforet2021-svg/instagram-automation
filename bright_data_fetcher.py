@@ -1470,7 +1470,7 @@ def _print_batch_fetch_summary(
     print(f"  取得投稿合計:       {len([p for p in posts if not p.get('fetch_error')])}件")
 
     # account_health 更新
-    for acct in all_batch_accounts:
+    for acct in all_batch_accounts_flat:
         acct_l = acct.lower()
         if acct_l in failed_set:
             _update_account_health(acct, success=False, error_type="fetch_failed")
@@ -1487,10 +1487,10 @@ def _print_batch_fetch_summary(
         print(f"  ⚠️  要確認アカウント（連続3回以上失敗）: {', '.join(needs_review)}")
 
     # 取得できたアカウントが5未満の場合は警告
-    if succeeded_accounts < 5 and len(all_batch_accounts) >= 5:
+    if succeeded_accounts < 5 and len(all_batch_accounts_flat) >= 5:
         print()
         print("  ⚠️  取得処理に異常がある可能性があります")
-        print(f"     実際に取得できたアカウント: {succeeded_accounts}件 / 対象: {len(all_batch_accounts)}件")
+        print(f"     実際に取得できたアカウント: {succeeded_accounts}件 / 対象: {len(all_batch_accounts_flat)}件")
         if TEST_MODE:
             print("     テストモードが有効です (BRIGHT_DATA_TEST_MODE=1)")
         else:
