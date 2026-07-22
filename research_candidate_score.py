@@ -182,9 +182,27 @@ trend_score_debugシートで実データを確認した結果を踏まえ、ユ
 import datetime as dt
 from collections import deque as _deque
 
-# --- スコアしきい値・判定ラベル ---
-SCORE_THRESHOLD_MUST_ANALYZE = 90
-SCORE_THRESHOLD_CANDIDATE = 80
+# --- 各配点の最大値（2026-07-22: 正規化スコア導入のため明示） ---
+MAX_VIEWS_SCORE        = 10
+MAX_VIEW_RATIO_SCORE   = 30
+MAX_LIKE_RATE_SCORE    = 15
+MAX_COMMENT_RATE_SCORE = 15
+MAX_RECENCY_SCORE      = 5
+MAX_DURATION_SCORE     = 3
+MAX_FREQUENCY_SCORE    = 2
+MAX_RAW_SCORE = (
+    MAX_VIEWS_SCORE + MAX_VIEW_RATIO_SCORE + MAX_LIKE_RATE_SCORE +
+    MAX_COMMENT_RATE_SCORE + MAX_RECENCY_SCORE + MAX_DURATION_SCORE +
+    MAX_FREQUENCY_SCORE
+)  # = 80
+
+# --- 最低再生数条件（2026-07-22） ---
+MIN_VIEWS_ABSOLUTE   = 100_000  # 絶対再生数しきい値
+MIN_VIEWS_MULTIPLIER = 1.0      # フォロワー数比しきい値
+
+# --- スコアしきい値・判定ラベル（2026-07-22: 正規化スコア100点換算に変更） ---
+SCORE_THRESHOLD_MUST_ANALYZE = 80   # 正規化スコア: TIER_MUST_ANALYZE
+SCORE_THRESHOLD_CANDIDATE    = 65   # 正規化スコア: TIER_CANDIDATE (AI分析の最低線)
 
 # --- 同一アカウント上限 ---
 MAX_POSTS_PER_ACCOUNT = 2         # ①②③ 1アカウントから採用する最大投稿数
@@ -200,15 +218,13 @@ TIER_CANDIDATE = "投稿案候補"
 TIER_SAVE_ONLY = "保存のみ"
 TIER_PENDING = "評価保留"  # 再生数0または欠損の投稿(通常ランキングから除外)
 
-# 表示用ラベル(classify_tier)のしきい値。2026-07-05: AI分析を実行するかどうかの
-# 判定にも再びこの値を使う(select_for_analysis参照。2026-07-02〜2026-07-05の間は
-# 表示用ラベルのみで使われていた)。
-ANALYSIS_MIN_SCORE = SCORE_THRESHOLD_CANDIDATE
+# AI分析ゲートのしきい値（2026-07-22: 正規化スコア65点以上＝TIER_CANDIDATE以上）。
+# 正規化スコア = raw_score / MAX_RAW_SCORE * 100。
+# ANALYSIS_MIN_SCORE以上が0件の日はAI分析0件（想定内の挙動）。
+ANALYSIS_MIN_SCORE = SCORE_THRESHOLD_CANDIDATE  # = 65 (正規化スコア)
 
 # AI個別分析(openai_analyzer.analyze_post_structure / generate_core_hari_idea等)を
-# 実行する最大件数。2026-07-05: ANALYSIS_MIN_SCORE以上の投稿の中から、この件数を
-# 上限に上位を選ぶ(select_for_analysis参照。ANALYSIS_MIN_SCORE以上が0件の日は
-# AI分析対象も0件になる)。
+# 実行する最大件数。ANALYSIS_MIN_SCORE以上の投稿の中から上位を選ぶ。
 TOP_N_FOR_ANALYSIS = 5
 
 # 視聴維持・完了率の観点で最も伸びやすいとされる動画尺の範囲(秒)。
@@ -392,15 +408,27 @@ def _score_post_frequency(account_post_count_window) -> int:
     return 0
 
 
+def normalize_score(raw_score: int) -> float:
+    """
+    raw_score (0〜MAX_RAW_SCORE) を 0〜100 の正規化スコアに変換する。
+    【2026-07-22】配点変更で最大raw_scoreが変わっても判定しきい値を変える必要がなくなる。
+    """
+    if MAX_RAW_SCORE <= 0:
+        return 0.0
+    return round(raw_score / MAX_RAW_SCORE * 100, 1)
+
+
 def classify_tier(total: int, views_available: bool = True) -> str:
     """
-    【2026-07-17】views_available=Falseの場合は TIER_PENDING("評価保留")を返す。
+    【2026-07-22】正規化スコア(0〜100)を使ってTierを判定する。
+    views_available=Falseの場合は TIER_PENDING("評価保留")を返す。
     """
     if not views_available:
         return TIER_PENDING
-    if total >= SCORE_THRESHOLD_MUST_ANALYZE:
+    normalized = normalize_score(total)
+    if normalized >= SCORE_THRESHOLD_MUST_ANALYZE:
         return TIER_MUST_ANALYZE
-    if total >= SCORE_THRESHOLD_CANDIDATE:
+    if normalized >= SCORE_THRESHOLD_CANDIDATE:
         return TIER_CANDIDATE
     return TIER_SAVE_ONLY
 
@@ -473,6 +501,7 @@ def compute_research_candidate_score(post: dict) -> dict:
 
     return {
         "total": total,
+        "normalized_score": normalize_score(total),
         "breakdown": breakdown,
         "tier": classify_tier(total, views_available),
         "views_available": views_available,
@@ -577,38 +606,51 @@ def select_for_analysis(posts: list, top_n: int = TOP_N_FOR_ANALYSIS) -> list:
     """
     score_posts()済みの投稿リストから、AI個別分析の対象を選ぶ。
 
-    【2026-07-05】ユーザー要望「研究対象として価値がある投稿だけをAI分析対象に
-    してください」に対応し、2026-07-02に廃止していたスコアしきい値ゲートを
-    復活させた。ANALYSIS_MIN_SCORE(80点)以上の投稿だけに絞り込み、その中から
-    Research Candidate Score上位top_n件(既定5件)を選ぶ。ANALYSIS_MIN_SCORE
-    以上の投稿が1件もない日は、戻り値が空リストになる(=AI分析が実行されない
-    日がある、という2026-07-02以前の挙動に戻った。これは「常に何かを分析する」
-    より「研究対象として価値がある投稿だけを分析する」をユーザーが優先した
-    結果であり、想定どおりの挙動)。呼び出し側(main.py)は空リストを前提に
-    ハンドリングすること。
+    【2026-07-22】3つのゲートで絞り込む（正規化スコア65点以上が最低線）:
+      Gate 1: views_available=True 必須（再生数なし投稿は対象外）
+      Gate 2: 最低再生数条件 views >= MIN_VIEWS_ABSOLUTE OR
+              view_multiplier >= MIN_VIEWS_MULTIPLIER（どちらか一方を満たせばOK）
+      Gate 3: 正規化スコア >= ANALYSIS_MIN_SCORE (= 65)
+    Gate 2 を失敗した投稿には pool_exclusion_reason を付与する（副作用）。
 
-    【2026-07-17】tier="評価保留"(再生数なし)の投稿は対象から除外する。
-    再生数なし投稿は別途 split_by_views_availability / sort_no_views_by_engagement
-    でEngagement参考候補として管理する(AI分析は行わない)。
-
-    【2026-07-20】商品販売主体のリールをTrend Analysisから除外。
-    施術・セルフケア・顔の変化・表情筋・姿勢・美容知識系コンテンツを優先選出。
+    【2026-07-20】商品販売主体のリールを除外。施術・セルフケア系を優先選出。
     """
-    scored = [
-        p for p in (posts or [])
-        if p.get("research_candidate_score")
-        and p["research_candidate_score"].get("views_available", True)
-        and p["research_candidate_score"]["total"] >= ANALYSIS_MIN_SCORE
-        and not _is_product_sales_post(p)
-    ]
-    scored.sort(key=lambda p: p["research_candidate_score"]["total"], reverse=True)
+    scored = []
+    for p in (posts or []):
+        score_info = p.get("research_candidate_score")
+        if not score_info:
+            continue
+        # Gate 1: 再生数取得必須
+        if not score_info.get("views_available", True):
+            continue
+        # Gate 2: 最低再生数条件（いずれか一方を満たせばOK）
+        views          = p.get("views", 0) or 0
+        view_multiplier = p.get("view_multiplier") or 0.0
+        meets_abs  = views >= MIN_VIEWS_ABSOLUTE
+        meets_mult = view_multiplier >= MIN_VIEWS_MULTIPLIER
+        if not meets_abs and not meets_mult:
+            if not p.get("pool_exclusion_reason"):
+                if views < MIN_VIEWS_ABSOLUTE:
+                    p["pool_exclusion_reason"] = "再生数10万未満"
+                else:
+                    p["pool_exclusion_reason"] = "フォロワー数未満の再生"
+            continue
+        # Gate 3: 正規化スコアしきい値
+        if score_info.get("normalized_score", 0.0) < ANALYSIS_MIN_SCORE:
+            continue
+        # Gate 4: 商品販売主体を除外
+        if _is_product_sales_post(p):
+            continue
+        scored.append(p)
 
+    scored.sort(
+        key=lambda p: p["research_candidate_score"].get("normalized_score", 0.0),
+        reverse=True,
+    )
     # 施術・セルフケア系を優先: preferred を先頭に、残りを後ろに
     preferred = [p for p in scored if _has_preferred_content(p)]
     others    = [p for p in scored if not _has_preferred_content(p)]
-    ordered   = preferred + others
-
-    return ordered[:top_n]
+    return (preferred + others)[:top_n]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

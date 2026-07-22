@@ -471,5 +471,168 @@ class TestBatchFetchSummaryNoNameError(unittest.TestCase):
                          f"未定義変数 all_batch_accounts の参照が残っています: {bad_refs}")
 
 
+class TestViewsExtractionAndScoreNormalization(unittest.TestCase):
+    """test_24〜33: extract_views / _parse_view_string / 正規化スコア / 最低再生数ゲート"""
+
+    def setUp(self):
+        import sys, os, types
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        # bright_data_fetcher スタブ不要 (ネットワーク不使用関数のみテスト)
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        # 外部依存モジュールをスタブ化
+        for mod in ("openai", "gspread", "google.auth", "google.oauth2.service_account",
+                    "dotenv", "requests"):
+            top = mod.split(".")[0]
+            if top not in sys.modules:
+                sys.modules[top] = types.ModuleType(top)
+            if "." in mod and mod not in sys.modules:
+                sys.modules[mod] = types.ModuleType(mod)
+
+    # ── extract_views / _parse_view_string ─────────────────────────────────
+
+    def test_24_extract_views_from_raw_json(self):
+        """video_play_count フィールドがある場合に正しく再生数を取得できる"""
+        import importlib
+        bdf = importlib.import_module("bright_data_fetcher")
+        post = {"video_play_count": 150000, "views": None}
+        self.assertEqual(bdf.extract_views(post), 150000)
+
+    def test_25_parse_view_string_formats(self):
+        """文字列再生数 ("12,345" / "1.2万" / "2.4M") を数値化できる"""
+        import importlib
+        bdf = importlib.import_module("bright_data_fetcher")
+        pvs = bdf._parse_view_string
+        self.assertEqual(pvs("12,345"), 12345)
+        self.assertEqual(pvs("1.2万"), 12000)
+        self.assertEqual(pvs("2.4M"), 2400000)
+        self.assertEqual(pvs("500K"), 500000)
+        self.assertEqual(pvs("1.5B"), 1500000000)
+
+    def test_26_extract_views_null_vs_zero(self):
+        """null(未取得) は None を返し、0 は 0 を返す"""
+        import importlib
+        bdf = importlib.import_module("bright_data_fetcher")
+        # 全フィールドが None → 未取得 → None
+        post_null = {"video_play_count": None, "views": None}
+        self.assertIsNone(bdf.extract_views(post_null))
+        # 明示的ゼロ → 0
+        post_zero = {"video_play_count": None, "views": 0}
+        self.assertEqual(bdf.extract_views(post_zero), 0)
+
+    # ── 正規化スコア ───────────────────────────────────────────────────────
+
+    def test_27_max_raw_score_is_80(self):
+        """MAX_RAW_SCORE が 80 であること"""
+        import importlib
+        rcs = importlib.import_module("research_candidate_score")
+        self.assertEqual(rcs.MAX_RAW_SCORE, 80)
+
+    def test_28_normalize_score_100pt(self):
+        """raw_score=80(満点) が normalized_score=100.0 になる"""
+        import importlib
+        rcs = importlib.import_module("research_candidate_score")
+        self.assertEqual(rcs.normalize_score(80), 100.0)
+
+    def test_29_normalize_score_scaled(self):
+        """raw_score=64 が normalized_score=80.0 になる (64/80*100)"""
+        import importlib
+        rcs = importlib.import_module("research_candidate_score")
+        self.assertEqual(rcs.normalize_score(64), 80.0)
+
+    def test_30_views_none_not_in_analysis(self):
+        """views_available=False の投稿は AI 分析対象にならない"""
+        import importlib
+        rcs = importlib.import_module("research_candidate_score")
+        post = {
+            "views": 0, "likes": 500, "comments": 10,
+            "followers": 10000, "view_multiplier": None,
+            "posted_at_dt": None, "duration_sec": 30,
+            "account_post_count_window": 5,
+            "research_candidate_score": {
+                "total": 40, "normalized_score": 50.0,
+                "views_available": False, "tier": "評価保留", "anomalies": [],
+            },
+        }
+        result = rcs.select_for_analysis([post])
+        self.assertEqual(result, [])
+
+    def test_31_min_views_absolute_gate(self):
+        """10万再生未満かつ倍率 < 1.0 は AI 分析対象外になる"""
+        import importlib
+        rcs = importlib.import_module("research_candidate_score")
+        post = {
+            "views": 50000, "likes": 5000, "comments": 200,
+            "followers": 200000, "view_multiplier": 0.25,
+            "posted_at_dt": None, "duration_sec": 30,
+            "account_post_count_window": 5,
+            "research_candidate_score": {
+                "total": 60, "normalized_score": 75.0,
+                "views_available": True, "tier": "必ず分析", "anomalies": [],
+            },
+        }
+        result = rcs.select_for_analysis([post])
+        self.assertEqual(result, [])
+        self.assertEqual(post.get("pool_exclusion_reason"), "再生数10万未満")
+
+    def test_32_views_100k_qualifies(self):
+        """10万再生以上かつ正規化スコア >= 65 は分析対象になる"""
+        import importlib, datetime
+        rcs = importlib.import_module("research_candidate_score")
+        dt_now = datetime.datetime.now(datetime.timezone.utc)
+        post = {
+            "views": 100000, "likes": 5000, "comments": 200,
+            "followers": 50000, "view_multiplier": 2.0,
+            "posted_at_dt": dt_now, "duration_sec": 30,
+            "account_post_count_window": 5,
+            "caption": "", "hashtags": [],
+            "research_candidate_score": {
+                "total": 56, "normalized_score": 70.0,
+                "views_available": True, "tier": "投稿案候補", "anomalies": [],
+            },
+        }
+        result = rcs.select_for_analysis([post])
+        self.assertEqual(len(result), 1)
+
+    def test_33_view_multiplier_qualifies(self):
+        """再生倍率 >= 1.0 なら 10万再生未満でも分析対象になる"""
+        import importlib, datetime
+        rcs = importlib.import_module("research_candidate_score")
+        dt_now = datetime.datetime.now(datetime.timezone.utc)
+        post = {
+            "views": 80000, "likes": 3000, "comments": 100,
+            "followers": 60000, "view_multiplier": 1.33,
+            "posted_at_dt": dt_now, "duration_sec": 30,
+            "account_post_count_window": 4,
+            "caption": "", "hashtags": [],
+            "research_candidate_score": {
+                "total": 54, "normalized_score": 67.5,
+                "views_available": True, "tier": "投稿案候補", "anomalies": [],
+            },
+        }
+        result = rcs.select_for_analysis([post])
+        self.assertEqual(len(result), 1)
+
+    def test_34_full_marks_not_required(self):
+        """全項目満点でなくても normalized_score >= 65 なら分析対象になり得る"""
+        import importlib, datetime
+        rcs = importlib.import_module("research_candidate_score")
+        # raw 52/80 → normalized 65.0 = ちょうどANALYSIS_MIN_SCORE
+        dt_now = datetime.datetime.now(datetime.timezone.utc)
+        post = {
+            "views": 500000, "likes": 8000, "comments": 300,
+            "followers": 100000, "view_multiplier": 5.0,
+            "posted_at_dt": dt_now, "duration_sec": 30,
+            "account_post_count_window": 6,
+            "caption": "", "hashtags": [],
+            "research_candidate_score": {
+                "total": 52, "normalized_score": 65.0,
+                "views_available": True, "tier": "投稿案候補", "anomalies": [],
+            },
+        }
+        result = rcs.select_for_analysis([post])
+        self.assertEqual(len(result), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

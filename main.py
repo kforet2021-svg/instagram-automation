@@ -730,10 +730,12 @@ def _score_and_analyze_posts(posts: list) -> None:
         )
 
     # スコア不足投稿に除外理由を付与（AI分析ゲートを通らない投稿）
+    # 最低再生数不足は select_for_analysis() 内で付与されるため、ここでは
+    # normalized_score 不足のみを "正規化スコア不足" として付与する。
     for p in accepted_posts:
-        score_total = (p.get("research_candidate_score") or {}).get("total", 0)
-        if score_total < ANALYSIS_MIN_SCORE and not p.get("pool_exclusion_reason"):
-            p["pool_exclusion_reason"] = "スコア不足"
+        norm_score = (p.get("research_candidate_score") or {}).get("normalized_score", 0.0)
+        if norm_score < ANALYSIS_MIN_SCORE and not p.get("pool_exclusion_reason"):
+            p["pool_exclusion_reason"] = "正規化スコア不足"
 
     # ⑧ ランキング表示用にアカウントが連続しないよう並び替え
     interleaved_posts = interleave_by_account(accepted_posts)
@@ -826,7 +828,7 @@ def _score_and_analyze_posts(posts: list) -> None:
     targets = select_for_analysis(accepted_posts)
     score_below_threshold = len(accepted_posts) - len(targets)
     if score_below_threshold > 0:
-        print(f"  スコア不足（ANALYSIS_MIN_SCORE未満または商品販売系）: {score_below_threshold}件 → AI分析対象外")
+        print(f"  正規化スコア不足・再生数条件未達・商品販売系: {score_below_threshold}件 → AI分析対象外")
     if not targets:
         # 2026-07-05: しきい値ゲート復活により、ANALYSIS_MIN_SCORE以上の投稿が
         # 1件もない日はここで0件になる。これはエラーではなく、「研究対象として

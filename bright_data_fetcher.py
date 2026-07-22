@@ -475,6 +475,69 @@ def _to_int_or_none(value):
         return None
 
 
+# 再生数として試みるフィールド名（優先度順）
+_VIEW_CANDIDATES = [
+    "video_play_count", "views", "play_count", "video_view_count",
+    "view_count", "plays", "clips_play_count", "ig_play_count",
+]
+
+
+def _parse_view_string(value) -> "int | None":
+    """
+    "12,345" / "1.2万" / "2.4M" / "500K" など多様な表記を整数に変換する。
+    - None/空 → None (未取得)
+    - 0       → 0    (APIが明示的に0を返した)
+    - 変換失敗 → None
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text.replace(",", "").replace("_", "")
+    upper = text.upper()
+    try:
+        if text.endswith("万"):
+            return int(float(text[:-1]) * 10_000)
+        if upper.endswith("K"):
+            return int(float(text[:-1]) * 1_000)
+        if upper.endswith("M"):
+            return int(float(text[:-1]) * 1_000_000)
+        if upper.endswith("B"):
+            return int(float(text[:-1]) * 1_000_000_000)
+        return int(float(text))
+    except (ValueError, TypeError):
+        return None
+
+
+def extract_views(item: dict) -> "int | None":
+    """
+    投稿dictから再生数を抽出する。
+
+    - _VIEW_CANDIDATES の順に試し、最初に値のあるフィールドを採用
+    - トップレベルと "input" ネストの両方を確認
+    - None  → 未取得（全候補がnull/存在しない）
+    - 0     → APIが明示的にゼロを返した
+    - int>0 → 再生数
+    """
+    if not isinstance(item, dict):
+        return None
+    sources = [item, item.get("input") or {}]
+    for src in sources:
+        for key in _VIEW_CANDIDATES:
+            raw = src.get(key)
+            if raw is None:
+                continue
+            parsed = _parse_view_string(raw)
+            if parsed is not None:
+                return parsed
+    return None
+
+
 def _parse_posted_at(raw):
     """
     date_posted (例: "2026-02-26T03:23:20.000Z") をdatetime(UTC)に変換する。
@@ -661,23 +724,6 @@ def _normalize_post(item: dict, source_account: str, category: str) -> dict:
 
     caption = _get_first(item, ["description"], "") or ""
 
-    views_raw = _get_first(item, ["views", "video_play_count"], 0)
-    # 【再生数取得できない原因調査ログ (2026-07-20)】
-    # Bright Data Discover-by-URL では views/video_play_count が None になるケースが頻発。
-    # 原因: Instagram がプロフィール未認証ユーザーに再生数を非公開にしている可能性。
-    #       または Bright Data の内部データソースが Reels の plays を取得していない。
-    # このログでフィールドの実態を確認する（1投稿目のみ）。
-    if item is not None and not hasattr(_normalize_post, "_views_logged"):
-        _normalize_post._views_logged = True
-        raw_views = item.get("views")
-        raw_vpc = item.get("video_play_count")
-        if raw_views is None and raw_vpc is None:
-            print(
-                f"  [views調査] views=None, video_play_count=None "
-                f"(投稿: {item.get('url', '')[:60]})"
-            )
-        else:
-            print(f"  [views調査] views={raw_views}, video_play_count={raw_vpc}")
     likes_raw = _get_first(item, ["likes"], 0)
     comments_raw = _get_first(item, ["num_comments"], 0)
     duration_raw = _get_first(item, ["length"], None)
@@ -689,7 +735,10 @@ def _normalize_post(item: dict, source_account: str, category: str) -> dict:
     posted_at_raw = _get_first(item, ["date_posted"], "") or ""
     posted_at_dt = _parse_posted_at(posted_at_raw)
 
-    views = _to_int(views_raw)
+    # extract_views: null(未取得) と 0(明示的ゼロ) を区別する
+    # None → API未返却, 0 → APIが明示的に0を返した, int>0 → 実再生数
+    views_fetched = extract_views(item)
+    views = views_fetched if views_fetched is not None else 0
     followers = _extract_followers(item)
     view_multiplier = round(views / followers, 2) if followers else None
     growth_velocity, growth_rate = _compute_growth_metrics(views, followers, posted_at_dt)
@@ -1260,7 +1309,7 @@ def print_instagram_fetch_quality_report(
     reels_count = sum(1 for p in valid if p.get("is_reel") or p.get("type") == "reel")
 
     # 再生数・フォロワー数取得率
-    has_views = sum(1 for p in valid if p.get("play_count", 0) or p.get("video_view_count", 0))
+    has_views = sum(1 for p in valid if (p.get("views") or 0) > 0)
     has_followers = sum(1 for p in valid if p.get("followers") or p.get("followers_count"))
 
     # アカウント別取得件数
