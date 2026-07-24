@@ -287,9 +287,9 @@ from accounts import (
     AUTO_PROMOTE_MIN_SOURCE_ACCOUNTS,
 )
 
-# --- 取得方式: Bright Dataのみ(Apifyは完全停止) ---
+# --- 取得プロバイダ (INSTAGRAM_FETCH_PROVIDER で brightdata/apify を切り替え) ---
+from instagram_fetcher import fetch_trend_posts
 from bright_data_fetcher import (
-    fetch_trend_posts,
     build_post_pool,
     apply_beauty_category,
     CATEGORY_ALL,
