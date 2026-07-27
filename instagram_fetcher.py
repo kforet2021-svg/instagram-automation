@@ -352,6 +352,13 @@ def _attach_account_post_counts(posts: list) -> None:
 # Apify 取得コア
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _run_attr(run_obj, attr: str, default=""):
+    """apify_client v3 の Run オブジェクト (Pydantic モデル) から属性を安全に取得する。"""
+    if run_obj is None:
+        return default
+    return getattr(run_obj, attr, default) or default
+
+
 def _collect_dataset_items(client, dataset_id: str) -> list:
     try:
         return list(client.dataset(dataset_id).iterate_items())
@@ -415,15 +422,15 @@ def _apify_fetch_trend_posts(accounts: list, results_limit: int) -> dict:
         accounts_in_run = run.get("accounts", [])
 
         try:
-            run_info = client.run(run_id).get() or {}
-            status = run_info.get("status", "UNKNOWN")
+            run_info = client.run(run_id).get()
+            status = str(_run_attr(run_info, "status", "UNKNOWN"))
         except Exception as e:
             print(f"[Apify] {bk}: pending run確認エラー (run_id={run_id}): {e}")
             still_pending_runs.append(run)
             continue
 
         if status == "SUCCEEDED":
-            dataset_id = run_info.get("defaultDatasetId") or run.get("dataset_id", "")
+            dataset_id = _run_attr(run_info, "default_dataset_id") or run.get("dataset_id", "")
             items = _collect_dataset_items(client, dataset_id) if dataset_id else []
             recovered_posts.extend(_normalize_items(items, _CATEGORY_ALL))
             snapshot_meta.append({
@@ -481,8 +488,8 @@ def _apify_fetch_trend_posts(accounts: list, results_limit: int) -> dict:
         print(f"[Apify] {bk}: Actor開始 ({len(batch)}アカウント, retry={retry_count})")
         try:
             run_info = client.actor(APIFY_ACTOR_ID).start(run_input=run_input)
-            run_id = run_info.get("id") or ""
-            dataset_id = run_info.get("defaultDatasetId") or ""
+            run_id = _run_attr(run_info, "id")
+            dataset_id = _run_attr(run_info, "default_dataset_id")
             active_runs.append({
                 "batch_key": bk,
                 "run_id": run_id,
@@ -515,8 +522,8 @@ def _apify_fetch_trend_posts(accounts: list, results_limit: int) -> dict:
             run_id = run["run_id"]
             bk = run["batch_key"]
             try:
-                run_info = client.run(run_id).get() or {}
-                status = run_info.get("status", "UNKNOWN")
+                run_info = client.run(run_id).get()
+                status = str(_run_attr(run_info, "status", "UNKNOWN"))
             except Exception as e:
                 print(f"[Apify] {bk}: ポーリングエラー: {e}")
                 next_waiting.append(run)
@@ -524,7 +531,7 @@ def _apify_fetch_trend_posts(accounts: list, results_limit: int) -> dict:
 
             if status == "SUCCEEDED":
                 dataset_id = (
-                    run_info.get("defaultDatasetId") or run.get("dataset_id", "")
+                    _run_attr(run_info, "default_dataset_id") or run.get("dataset_id", "")
                 )
                 items = _collect_dataset_items(client, dataset_id) if dataset_id else []
                 new_posts.extend(_normalize_items(items, _CATEGORY_ALL))
