@@ -200,6 +200,18 @@ MAX_RAW_SCORE = (
 MIN_VIEWS_ABSOLUTE   = 100_000  # 絶対再生数しきい値
 MIN_VIEWS_MULTIPLIER = 1.0      # フォロワー数比しきい値
 
+# --- followers未取得時のフォールバック (2026-07-28: 提案済み・未有効化) ---
+# followers=None のままAI分析が完全停止するのを防ぐフォールバック閾値。
+# 再生数がこの値以上あれば、フォロワーなし・スコア不足でも分析を許可する案。
+# 有効化する場合: select_for_analysis の Gate 3 に以下のバイパス条件を追加する:
+#   if score_info.get("normalized_score", 0.0) < ANALYSIS_MIN_SCORE:
+#       views = p.get("views", 0) or 0
+#       if p.get("followers") is None and views >= NO_FOLLOWERS_MIN_VIEWS:
+#           pass  # バイパス: 超バイラル投稿はフォロワーなしでも分析する
+#       else:
+#           continue
+NO_FOLLOWERS_MIN_VIEWS: int = 500_000  # 未有効化
+
 # --- スコアしきい値・判定ラベル（2026-07-22: 正規化スコア100点換算に変更） ---
 SCORE_THRESHOLD_MUST_ANALYZE = 80   # 正規化スコア: TIER_MUST_ANALYZE
 SCORE_THRESHOLD_CANDIDATE    = 65   # 正規化スコア: TIER_CANDIDATE (AI分析の最低線)

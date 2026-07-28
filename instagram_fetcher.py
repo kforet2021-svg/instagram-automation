@@ -34,6 +34,7 @@ INSTAGRAM_FETCH_PROVIDER: str = os.getenv("INSTAGRAM_FETCH_PROVIDER", "brightdat
 
 # ── Apify 定数 ────────────────────────────────────────────────────────────────
 APIFY_ACTOR_ID = "apify/instagram-reel-scraper"
+APIFY_PROFILE_ACTOR_ID = "apify/instagram-profile-scraper"
 APIFY_ACCOUNTS_PER_BATCH: int = int(os.getenv("APIFY_ACCOUNTS_PER_BATCH", "15"))
 APIFY_MAX_CONCURRENT = 3
 APIFY_WAIT_SECS: int = int(os.getenv("APIFY_WAIT_SECS", "1800"))  # 30分
@@ -375,6 +376,59 @@ def _normalize_items(items: list, category: str) -> list:
     return posts
 
 
+def _fetch_follower_counts(client, usernames: list) -> dict:
+    """
+    apify/instagram-profile-scraper を使いフォロワー数を一括取得する (2nd pass)。
+    戻り値: {username_lower: followers_int}
+    失敗時は空 dict を返し、呼び出し元は followers=None のままパイプラインを継続する。
+    """
+    if not usernames:
+        return {}
+    print(f"[Apify] プロフィール 2nd pass: {len(usernames)}アカウント")
+    try:
+        run_info = client.actor(APIFY_PROFILE_ACTOR_ID).call(
+            run_input={"usernames": usernames}
+        )
+        dataset_id = _run_attr(run_info, "default_dataset_id")
+        items = _collect_dataset_items(client, dataset_id) if dataset_id else []
+        print(f"[Apify] プロフィール取得完了: {len(items)} 件")
+    except Exception as e:
+        print(f"[Apify] プロフィール取得失敗 (followers=None で継続): {e}")
+        return {}
+
+    result = {}
+    for item in items:
+        uname = str(
+            _get_first(item, ["username", "ownerUsername", "userName"], "") or ""
+        ).lower().lstrip("@").strip()
+        followers = _to_int_or_none(
+            _get_first(item, ["followersCount", "followerCount", "followers"], None)
+        )
+        if uname and followers is not None:
+            result[uname] = followers
+    return result
+
+
+def _merge_followers(posts: list, follower_map: dict) -> None:
+    """
+    follower_map ({username_lower: count}) から各投稿の followers を補完する (in-place)。
+    補完した投稿は view_multiplier / growth_velocity / growth_rate も再計算する。
+    """
+    for post in posts:
+        if post.get("followers") is not None:
+            continue
+        uname = (post.get("username") or "").lower().lstrip("@").strip()
+        followers = follower_map.get(uname)
+        if followers is None:
+            continue
+        post["followers"] = followers
+        views = post.get("views") or 0
+        post["view_multiplier"] = round(views / followers, 2) if followers else None
+        gv, gr = _compute_growth_metrics(views, followers, post.get("posted_at_dt"))
+        post["growth_velocity"] = gv
+        post["growth_rate"] = gr
+
+
 def _apify_fetch_trend_posts(accounts: list, results_limit: int) -> dict:
     """
     Apify instagram-reel-scraper Actor を使って投稿を取得する。
@@ -578,6 +632,22 @@ def _apify_fetch_trend_posts(accounts: list, results_limit: int) -> dict:
 
     # ── 5. 全投稿を統合 ──────────────────────────────────────────────────────
     all_posts = recovered_posts + new_posts
+
+    # ── 5b. フォロワー数 2nd pass (apify/instagram-profile-scraper) ──────────
+    # instagram-reel-scraper はフォロワー数を返さないため、
+    # 取得できた投稿のユニークアカウント名でプロフィール取得を追加実行する。
+    usernames_need_followers = list({
+        p["username"].lower().lstrip("@").strip()
+        for p in all_posts
+        if p.get("username") and not p.get("fetch_error") and p.get("followers") is None
+    })
+    if usernames_need_followers:
+        follower_map = _fetch_follower_counts(client, usernames_need_followers)
+        if follower_map:
+            _merge_followers(all_posts, follower_map)
+            merged = sum(1 for p in all_posts if p.get("followers") is not None)
+            print(f"[Apify] followers補完: {merged}/{len(all_posts)} 件")
+
     _attach_account_post_counts(all_posts)
 
     print(f"[Apify] 合計 {len(all_posts)} 件取得")
