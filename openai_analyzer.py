@@ -93,6 +93,9 @@ from prompts import (
     build_north_star_daily_prompt,
     build_trend_continuity_prompt,
     build_editorial_comment_prompt,
+    EDITORIAL_V2_SYSTEM_PROMPT,
+    EDITORIAL_V2_HOOK_COUNT,
+    build_editorial_v2_prompt,
 )
 
 MODEL_NAME = OPENAI_MODEL  # .envのOPENAI_MODELで変更可能。未設定時はgpt-4o-mini
@@ -383,6 +386,64 @@ def generate_editorial_comment(entries: list) -> dict:
 
     parsed = _parse_response_content(content, list(EDITORIAL_COMMENT_TEXT_KEYS))
     return {key: str(parsed.get(key, "")).strip() for key in EDITORIAL_COMMENT_TEXT_KEYS}
+
+
+def generate_editorial_v2(entries: list) -> list:
+    """
+    AI編集長 v2 — 生成済み投稿案を公開前に査読し、Hook改善案を出力する。
+    【2026-07-29追加】1回/実行。entriesを1プロンプトでまとめて処理。
+
+    entries: [{"post":..., "idea":..., "success_factors":...}]
+    戻り値: 投稿1件あたり1 dictのリスト。各dictのキー:
+        post_url, original_hook,
+        hooks (list of {rank,hook,ctr,save_rate,comment_rate,score}),
+        best_rank, best_hook, best_score, revision_reason, revised_opening
+    失敗時は []。
+    """
+    if not entries:
+        return []
+
+    prompt = build_editorial_v2_prompt(entries)
+    content = _call_openai(
+        prompt,
+        system_prompt=EDITORIAL_V2_SYSTEM_PROMPT,
+        label="editorial v2",
+    )
+
+    parsed = _try_parse_json(content)
+    if parsed is None:
+        parsed = _try_extract_json_block(content)
+
+    if not isinstance(parsed, dict):
+        return []
+
+    raw_entries = parsed.get("entries") or []
+    if not isinstance(raw_entries, list):
+        return []
+
+    results = []
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            continue
+        hooks = item.get("hooks") or []
+        if isinstance(hooks, list):
+            hooks = [h for h in hooks if isinstance(h, dict)]
+        # 5件に満たない場合は空dictで補完
+        while len(hooks) < EDITORIAL_V2_HOOK_COUNT:
+            hooks.append({})
+        hooks = hooks[:EDITORIAL_V2_HOOK_COUNT]
+
+        results.append({
+            "post_url": str(item.get("post_url") or ""),
+            "original_hook": str(item.get("original_hook") or ""),
+            "hooks": hooks,
+            "best_rank": int(item.get("best_rank") or 0),
+            "best_hook": str(item.get("best_hook") or ""),
+            "best_score": int(item.get("best_score") or 0),
+            "revision_reason": str(item.get("revision_reason") or ""),
+            "revised_opening": str(item.get("revised_opening") or ""),
+        })
+    return results
 
 
 def generate_trend_continuity_report(entries_by_day: dict, total_posts: int) -> dict:

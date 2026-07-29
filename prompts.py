@@ -1090,6 +1090,101 @@ JSON形式のみで出力してください(キー名は厳守):
 
 
 # ---------------------------------------------------------------------------
+# AI編集長 v2 (generate_editorial_v2) — 2026-07-29追加
+#
+# 目的: generate_core_hari_ideaで生成した投稿案を公開前に査読する。
+# 1実行あたり+1回のOpenAI呼び出し(entries全件をまとめて1プロンプトで処理)。
+# 出力: 投稿案1件あたり「Hook5案 × 3指標スコア + 最優秀案 + 修正理由 + 修正版冒頭」
+# ---------------------------------------------------------------------------
+
+EDITORIAL_V2_HOOK_COUNT = 5
+
+EDITORIAL_V2_SYSTEM_PROMPT = """あなたはInstagram専門のコンテンツ編集長です。
+
+【役割】
+CORE HARI FACE（札幌の顔専門エステサロン：小顔矯正・顔筋トレーニング・たるみ改善）の
+投稿案を公開前に査読し、Hookの改善案を複数提示して最優秀案を採用する。
+
+【Hook採点基準(各0〜100点)】
+- CTR(クリック率): サムネイルやタイトルを見て「続きを見たい」と思わせる強さ。
+  高い: 意外性・問いかけ・数字・タブー感。低い: 一般論・専門用語多用・長すぎ。
+- 保存率: 「後で使いたい・誰かに教えたい」と思わせる有用性。
+  高い: 具体的手順・一般に知られていない知識・すぐ試せる。低い: 感想・売り込み。
+- コメント率: 自分ごと化・共感・議論を誘発する力。
+  高い: 「私もそう！」「え、知らなかった」の引き起こし方。低い: 教科書的。
+- 総合採点: CTR×40 + 保存率×35 + コメント率×25 を100で割った整数。
+
+【修正理由の書き方】
+「なぜ元の案より◯◯が優れているか」を1〜2文で。根拠のある表現のみ使う。
+
+【禁止】
+- 医学的断定（「効果があります」「科学的に証明」等）
+- 競合比較や誇大表現
+- 修正版で全く新しいテーマに変えること（元投稿の構造を活かすこと）
+
+【出力形式】
+JSONのみ。"entries"キーに配列で各投稿の結果を入れる。"""
+
+
+def build_editorial_v2_prompt(entries: list) -> str:
+    """
+    AI編集長 v2 用プロンプトを構築する。
+    entries: [{"post":..., "idea":..., "success_factors":...}]
+    """
+    lines = [
+        f"【査読対象】{len(entries)}件のCORE HARI FACE投稿案",
+        "",
+        "各投稿案に対して:",
+        f"1. Hookを{EDITORIAL_V2_HOOK_COUNT}案生成",
+        "2. 各HookのCTR・保存率・コメント率・総合採点(0〜100)を予測",
+        "3. 最優秀案(最高総合採点)を採用",
+        "4. 元Hookとの差分・修正理由を出力",
+        "5. 採用Hookを使った修正版冒頭3秒を生成",
+        "",
+        "【投稿案一覧】",
+    ]
+
+    for i, entry in enumerate(entries, 1):
+        post = entry.get("post") or {}
+        idea = entry.get("idea") or {}
+        sf = entry.get("success_factors") or {}
+        lines.append(f"\n--- 投稿{i} ---")
+        lines.append(f"URL: {post.get('url', '不明')}")
+        lines.append(f"タイトル(現案): {idea.get('タイトル', '')}")
+        lines.append(f"冒頭3秒(現案): {(idea.get('30秒版リール', '') or '')[:120]}")
+        lines.append(f"投稿カテゴリ: {idea.get('投稿カテゴリ', '')}")
+        lines.append(f"参考元フック: {sf.get('冒頭3秒のフック', '')}")
+        lines.append(f"伸びた理由: {sf.get('伸びた理由', '')}")
+        lines.append(f"心理トリガー: {sf.get('心理トリガー', '')}")
+
+    lines.append("")
+    lines.append("【出力JSON形式(厳守)】")
+    lines.append("""
+{
+  "entries": [
+    {
+      "post_url": "投稿URL",
+      "original_hook": "元の冒頭3秒(現案から抜粋)",
+      "hooks": [
+        {"rank": 1, "hook": "Hook案1", "ctr": 整数, "save_rate": 整数, "comment_rate": 整数, "score": 整数},
+        {"rank": 2, "hook": "Hook案2", "ctr": 整数, "save_rate": 整数, "comment_rate": 整数, "score": 整数},
+        {"rank": 3, "hook": "Hook案3", "ctr": 整数, "save_rate": 整数, "comment_rate": 整数, "score": 整数},
+        {"rank": 4, "hook": "Hook案4", "ctr": 整数, "save_rate": 整数, "comment_rate": 整数, "score": 整数},
+        {"rank": 5, "hook": "Hook案5", "ctr": 整数, "save_rate": 整数, "comment_rate": 整数, "score": 整数}
+      ],
+      "best_rank": 最高採点のrank,
+      "best_hook": "採用Hook文字列",
+      "best_score": 採用Hookの採点整数,
+      "revision_reason": "修正理由(1〜2文)",
+      "revised_opening": "採用Hookを使った修正版冒頭3秒テキスト"
+    }
+  ]
+}
+""")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # トレンド継続性分析(generate_trend_continuity_report) — 2026-07-17追加
 #
 # ユーザー要望「直近10日間の分析結果を使って、継続トレンドと一時的な話題を区別し、

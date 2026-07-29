@@ -309,6 +309,7 @@ SHEET_DAILY_CONTENT_PICKS = "daily_content_picks"
 SHEET_CREATOR_STUDIO_DAILY = "creator_studio_daily"  # 2026-07-01 Creator Studio MVP
 SHEET_TREND_CONTINUITY = "trend_continuity"  # 2026-07-17: 直近10日間トレンド継続性分析
 SHEET_EDITORIAL_COMMENT = "editorial_comment"  # 2026-07-17: 編集長コメント(1行/実行)
+SHEET_EDITORIAL_V2 = "editorial_v2"            # 2026-07-29: AI編集長 v2(1投稿1行)
 SHEET_RUN_LOG = "run_log"  # 2026-07-18: 実行履歴ログ(1行/実行バッチ)
 SHEET_RESEARCH_CANDIDATES = "research_candidates"
 SHEET_RESEARCH_CANDIDATE_SCORE_DEBUG = "research_candidate_score_debug"
@@ -576,6 +577,15 @@ TREND_CONTINUITY_HEADERS = [
 
 # 2026-07-17: editorial_commentシート(1行/実行)
 EDITORIAL_COMMENT_HEADERS = ["実行日時", "分析投稿数"] + list(EDITORIAL_COMMENT_TEXT_KEYS)
+
+# 2026-07-29: editorial_v2シート — AI編集長 v2(1投稿1行)
+_V2_HOOK_N = 5
+EDITORIAL_V2_HEADERS = (
+    ["実行日時", "投稿URL", "投稿者", "元フック"]
+    + [col for i in range(1, _V2_HOOK_N + 1)
+       for col in (f"フック案{i}", f"CTR{i}", f"保存率{i}", f"コメント率{i}", f"採点{i}")]
+    + ["最優秀案", "最優秀採点", "修正理由", "修正版冒頭3秒"]
+)
 
 # 2026-07-18: run_logシート — 実行履歴ログ(1バッチ1行)
 RUN_LOG_HEADERS = [
@@ -1817,6 +1827,55 @@ def save_editorial_comment(entries: list, result: dict) -> None:
     for key in EDITORIAL_COMMENT_TEXT_KEYS:
         row.append(result.get(key, ""))
     worksheet.append_row(row, value_input_option="USER_ENTERED")
+
+
+# --- editorial_v2: AI編集長 v2 (2026-07-29追加) ---
+
+
+def save_editorial_v2(entries: list, v2_results: list) -> None:
+    """
+    generate_editorial_v2の結果をeditorial_v2シートに保存する(1投稿1行)。
+    v2_results: generate_editorial_v2の戻り値リスト。
+    entriesとv2_resultsは同順のため、URLでフォールバックマッチも行う。
+    """
+    if not v2_results:
+        return
+    worksheet = _get_or_create_worksheet(SHEET_EDITORIAL_V2, EDITORIAL_V2_HEADERS)
+    now = _now()
+
+    url_to_entry = {
+        (e.get("post") or {}).get("url", ""): e
+        for e in (entries or [])
+    }
+
+    rows = []
+    for v2 in v2_results:
+        post_url = v2.get("post_url", "")
+        entry = url_to_entry.get(post_url) or {}
+        post = entry.get("post") or {}
+        username = post.get("username", "")
+
+        row = [now, post_url, username, v2.get("original_hook", "")]
+        for hook_item in v2.get("hooks", []):
+            row += [
+                hook_item.get("hook", ""),
+                hook_item.get("ctr", ""),
+                hook_item.get("save_rate", ""),
+                hook_item.get("comment_rate", ""),
+                hook_item.get("score", ""),
+            ]
+        # hooks が5件未満の場合は空で埋める
+        while len(row) < 4 + _V2_HOOK_N * 5:
+            row += ["", "", "", "", ""]
+        row += [
+            v2.get("best_hook", ""),
+            v2.get("best_score", ""),
+            v2.get("revision_reason", ""),
+            v2.get("revised_opening", ""),
+        ]
+        rows.append(row)
+
+    _sheets_retry(worksheet.append_rows, rows, value_input_option="USER_ENTERED")
 
 
 # --- north_star_daily: Creator Intelligence Sprint 1 Task A(2026-07-03追加) ---

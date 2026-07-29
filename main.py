@@ -307,6 +307,7 @@ from openai_analyzer import (
     generate_north_star_daily,
     generate_trend_continuity_report,
     generate_editorial_comment,
+    generate_editorial_v2,
 )
 from sheets_writer import (
     save_raw_fetch_log,
@@ -335,6 +336,7 @@ from sheets_writer import (
     get_recent_success_factors,
     save_trend_continuity_report,
     save_editorial_comment,
+    save_editorial_v2,
     save_research_sources,
     ensure_creator_intelligence_library_sheets,
     ensure_manual_post_results_sheet,
@@ -975,6 +977,14 @@ def _score_and_analyze_posts(posts: list) -> None:
         print("編集長コメントをeditorial_commentシートに保存しました")
     except Exception as e:
         print(f"編集長コメントの生成・保存中にエラーが発生しました: {e}")
+
+    # 2026-07-29: AI編集長 v2 — Hook5案生成・採点・最優秀案採用・修正版生成(+1 OpenAI)
+    try:
+        v2_results = generate_editorial_v2(entries)
+        save_editorial_v2(entries, v2_results)
+        print(f"AI編集長 v2 をeditorial_v2シートに保存しました({len(v2_results)}件)")
+    except Exception as e:
+        print(f"AI編集長 v2 の生成・保存中にエラーが発生しました: {e}")
 
     # 2026-07-04(6回目、Sprint2④「North Star Dailyの根拠表示を強化」):
     # North Star Dailyの「根拠」項目はAIがテキストで要約するが、その元になった
