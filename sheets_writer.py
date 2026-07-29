@@ -886,6 +886,28 @@ def _blank_if_none(value):
     return "" if value is None else value
 
 
+def _sheets_retry(fn, *args, max_retries: int = 5, **kwargs):
+    """
+    Google Sheets API 呼び出しを指数バックオフでリトライするラッパー。
+    429 (quota exceeded) のときだけリトライし、それ以外の例外は即再送出する。
+    """
+    import time as _time
+    import gspread.exceptions as _gex
+    delay = 2.0
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except _gex.APIError as e:
+            msg = str(e)
+            if "[429]" in msg or "Quota exceeded" in msg or "RATE_LIMIT_EXCEEDED" in msg:
+                if attempt < max_retries - 1:
+                    _time.sleep(delay)
+                    delay = min(delay * 2, 60.0)
+                    continue
+            raise
+    return fn(*args, **kwargs)
+
+
 def _post_row(post: dict) -> list:
     return [
         post.get("url", ""),
@@ -2131,11 +2153,41 @@ def update_knowledge_unit(row_number: int, values: dict) -> None:
     """
     knowledge_unitsシートの既存行をまるごと上書きする(再発見時)。
     row_numberはget_knowledge_unitsが返した"row"の値をそのまま渡すこと。
+    row_number < 1 (同一実行内追加済みのセンチネル) の場合は何もしない。
     """
+    if row_number < 1:
+        return
     worksheet = _get_or_create_worksheet(SHEET_KNOWLEDGE_UNITS, KNOWLEDGE_UNITS_HEADERS)
     row = [str(values.get(h, "")) for h in KNOWLEDGE_UNITS_HEADERS]
     end_col = chr(ord("A") + len(KNOWLEDGE_UNITS_HEADERS) - 1)
-    worksheet.update(f"A{row_number}:{end_col}{row_number}", [row], value_input_option="USER_ENTERED")
+    _sheets_retry(
+        worksheet.update,
+        f"A{row_number}:{end_col}{row_number}",
+        [row],
+        value_input_option="USER_ENTERED",
+    )
+
+
+def batch_update_knowledge_units(updates: list) -> int:
+    """
+    knowledge_unitsシートの複数行を1回の batch_update で一括上書きする。
+    updates: [(row_number, values_dict), ...] のリスト。row_number < 1 はスキップ。
+    戻り値: 実際に更新した件数。
+    """
+    valid = [(rn, v) for rn, v in updates if rn >= 1]
+    if not valid:
+        return 0
+    worksheet = _get_or_create_worksheet(SHEET_KNOWLEDGE_UNITS, KNOWLEDGE_UNITS_HEADERS)
+    end_col = chr(ord("A") + len(KNOWLEDGE_UNITS_HEADERS) - 1)
+    data = [
+        {
+            "range": f"A{rn}:{end_col}{rn}",
+            "values": [[str(v.get(h, "")) for h in KNOWLEDGE_UNITS_HEADERS]],
+        }
+        for rn, v in valid
+    ]
+    _sheets_retry(worksheet.batch_update, data, value_input_option="USER_ENTERED")
+    return len(valid)
 
 
 # ────────────────────────────────────────────────────────────────────────────

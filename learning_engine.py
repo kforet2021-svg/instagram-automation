@@ -443,6 +443,10 @@ def _upsert_unit(unit: dict, existing: dict, today: str) -> str:
     # 再発見 → evidence_count++、confidence再計算、status昇格判定
     existing_row = existing[uid]
     row_id = existing_row["row"]
+    # row_id < 1 は「同一実行内で追加済み・行番号不明」のセンチネル。
+    # Sheets 更新は行わずスキップ（二重追加を防ぐだけで十分）。
+    if row_id < 1:
+        return "skipped"
     old = existing_row["values"]
 
     try:
@@ -725,6 +729,7 @@ def _refresh_confidence_from_evidence(affected_unit_ids: set, today: str) -> Non
         print(f"  ⚠️ _refresh_confidence: knowledge_units読み込み失敗: {e}")
         return
 
+    batch: list = []
     for r in ku_rows:
         v = r["values"]
         uid = v.get("unit_id", "")
@@ -736,10 +741,14 @@ def _refresh_confidence_from_evidence(affected_unit_ids: set, today: str) -> Non
             continue
         updated = dict(v)
         updated["confidence"] = new_conf
+        batch.append((r["row"], updated))
+
+    if batch:
         try:
-            sheets_writer.update_knowledge_unit(r["row"], updated)
+            n = sheets_writer.batch_update_knowledge_units(batch)
+            print(f"  confidence一括更新: {n}件")
         except Exception as e:
-            print(f"  ⚠️ confidence更新失敗({uid}): {e}")
+            print(f"  ⚠️ confidence一括更新失敗: {e}")
 
 
 def run_learning_engine(entries: list) -> None:
@@ -782,8 +791,9 @@ def run_learning_engine(entries: list) -> None:
         # 追加した場合はexistingをその場で更新(同一実行内の重複検知)
         if result == "added":
             uid = unit["unit_id"]
-            # 行番号は厳密には不明だが、今回の実行内ではこれ以上更新しないので0で代替
-            existing[uid] = {"row": 0, "values": unit}
+            # row=-1 は「同一実行内で追加済み・行番号不明」のセンチネル。
+            # _upsert_unit は row_id < 1 をチェックしてスキップする。
+            existing[uid] = {"row": -1, "values": unit}
 
     # ── Evidence Layer (Sprint3) ──────────────────────────────────────────
     # entryごとにEvidence登録 + EvidenceLinks登録 → confidence再計算
