@@ -21,6 +21,9 @@ test_write_check.tmp
 # generated reports
 reports/
 
+# 自動運転ログ（ローカル・GHA artifact で管理）
+logs/*.log
+
 # chatgpt prompt outputs
 outputs/
 
