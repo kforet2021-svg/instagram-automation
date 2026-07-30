@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── プロバイダ設定 ─────────────────────────────────────────────────────────────
-INSTAGRAM_FETCH_PROVIDER: str = os.getenv("INSTAGRAM_FETCH_PROVIDER", "brightdata")
+INSTAGRAM_FETCH_PROVIDER: str = os.getenv("INSTAGRAM_FETCH_PROVIDER") or "apify"
 
 # ── Apify 定数 ────────────────────────────────────────────────────────────────
 APIFY_ACTOR_ID = "apify/instagram-reel-scraper"
