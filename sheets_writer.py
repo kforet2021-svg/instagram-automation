@@ -888,6 +888,15 @@ def _get_or_create_worksheet(sheet_name: str, headers: list):
     return worksheet
 
 
+def log_spreadsheet_info() -> None:
+    """起動時にスプレッドシート名・既存シート一覧をログへ出力する。"""
+    sh = _get_spreadsheet()
+    tabs = [ws.title for ws in sh.worksheets()]
+    print(f"[Sheets] スプレッドシート名 : {sh.title}")
+    print(f"[Sheets] GOOGLE_SHEET_ID    : {GOOGLE_SHEET_ID}")
+    print(f"[Sheets] 既存シート ({len(tabs)}件) : {', '.join(tabs)}")
+
+
 def _now() -> str:
     return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 

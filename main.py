@@ -310,6 +310,7 @@ from openai_analyzer import (
     generate_editorial_v2,
 )
 from sheets_writer import (
+    log_spreadsheet_info,
     save_raw_fetch_log,
     save_adopted_posts,
     save_rankings,
@@ -1369,6 +1370,11 @@ def main(fallback_mode: bool = False) -> None:
     except EnvironmentError as e:
         print(f"設定エラー: {e}")
         sys.exit(1)
+
+    try:
+        log_spreadsheet_info()
+    except Exception as e:
+        print(f"[Sheets] スプレッドシート接続に失敗しました: {e}")
 
     # 2026-07-03(Creator Intelligence Sprint 1 Task B): north_star_daily +
     # 6つのライブラリ系シート(雛形・ヘッダーのみ)が無ければ作成する。
