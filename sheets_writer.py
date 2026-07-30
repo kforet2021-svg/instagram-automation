@@ -888,12 +888,22 @@ def _get_or_create_worksheet(sheet_name: str, headers: list):
     return worksheet
 
 
+SPREADSHEET_URL_BASE = "https://docs.google.com/spreadsheets/d"
+
+
+def get_spreadsheet_url() -> str:
+    """スプレッドシートの URL を返す。"""
+    return f"{SPREADSHEET_URL_BASE}/{GOOGLE_SHEET_ID}"
+
+
 def log_spreadsheet_info() -> None:
-    """起動時にスプレッドシート名・既存シート一覧をログへ出力する。"""
+    """起動時にスプレッドシート名・ID・URL・既存シート一覧をログへ出力する。"""
     sh = _get_spreadsheet()
     tabs = [ws.title for ws in sh.worksheets()]
+    url = get_spreadsheet_url()
     print(f"[Sheets] スプレッドシート名 : {sh.title}")
     print(f"[Sheets] GOOGLE_SHEET_ID    : {GOOGLE_SHEET_ID}")
+    print(f"[Sheets] URL                : {url}")
     print(f"[Sheets] 既存シート ({len(tabs)}件) : {', '.join(tabs)}")
 
 

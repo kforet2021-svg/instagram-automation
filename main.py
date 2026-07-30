@@ -311,6 +311,7 @@ from openai_analyzer import (
 )
 from sheets_writer import (
     log_spreadsheet_info,
+    get_spreadsheet_url,
     save_raw_fetch_log,
     save_adopted_posts,
     save_rankings,
@@ -1648,6 +1649,7 @@ def main(fallback_mode: bool = False) -> None:
 
     print()
     print("すべての処理が完了しました")
+    print(f"保存先スプレッドシート: {get_spreadsheet_url()}")
 
 
 if __name__ == "__main__":
