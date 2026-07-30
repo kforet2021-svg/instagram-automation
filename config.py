@@ -4,9 +4,11 @@ config.py
 
 このプロジェクトでは以下の環境変数を使用する:
 - OPENAI_API_KEY
-- BRIGHT_DATA_API_KEY  (リール/プロフィール取得。bright_data_fetcher.pyが使用)
+- APIFY_API_TOKEN       (instagram_fetcher.py / Apify経由のリール・プロフィール取得)
 - GOOGLE_SHEET_ID
 - GOOGLE_SERVICE_ACCOUNT_JSON  (※ GOOGLE_ACCOUNT_JSON ではない)
+- INSTAGRAM_FETCH_PROVIDER     (省略時 "brightdata"。現在は "apify" を使用)
+- BRIGHT_DATA_API_KEY  (旧プロバイダ。現在は未使用、必須チェックから除外)
 
 取得対象アカウント(ジャンル不問のアンテナアカウント)は accounts.py の
 ANTENNA_ACCOUNTSで管理する。新規アカウント候補はcandidate_discovery.pyが
@@ -14,11 +16,9 @@ ANTENNA_ACCOUNTSで管理する。新規アカウント候補はcandidate_discov
 人の承認なしに自動でANTENNA_ACCOUNTSに追加される(main.pyが実行ごとに
 accounts_writer.add_accountsを呼ぶ)。
 
-2026-06-29: Apifyを完全停止した。APIFY_API_TOKENはこのモジュールでは
-読み込まない(=main.pyの実行経路でApifyの環境変数は一切参照・使用しない)。
-apify_fetcher.py / competitor_discovery.py はバックアップとして残しているが、
-これらを手動で再度有効化する場合は、APIFY_API_TOKEN の読み込みをこのファイルに
-復元する必要がある。
+2026-07-30: Bright Data → Apify に完全移行。BRIGHT_DATA_API_KEY は
+バックアップとして読み込むが validate_config() の必須チェックから除外。
+APIFY_API_TOKEN を必須に昇格。
 """
 
 import os
@@ -40,7 +40,8 @@ REGION: str = os.getenv("REGION", "北海道札幌市")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 # 投稿生成に使うモデル（.envで変更可能。未設定時はgpt-4o-mini）
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-BRIGHT_DATA_API_KEY = os.getenv("BRIGHT_DATA_API_KEY", "")
+APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "")
+BRIGHT_DATA_API_KEY = os.getenv("BRIGHT_DATA_API_KEY", "")  # 旧プロバイダ、現在未使用
 
 # --- Googleスプレッドシート ---
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
@@ -52,7 +53,7 @@ def validate_config() -> None:
     """必須項目が.envに設定されているか検証する。不足があれば例外を投げる。"""
     required = {
         "OPENAI_API_KEY": OPENAI_API_KEY,
-        "BRIGHT_DATA_API_KEY": BRIGHT_DATA_API_KEY,
+        "APIFY_API_TOKEN": APIFY_API_TOKEN,
         "GOOGLE_SHEET_ID": GOOGLE_SHEET_ID,
         "GOOGLE_SERVICE_ACCOUNT_JSON": GOOGLE_SERVICE_ACCOUNT_JSON,
     }
