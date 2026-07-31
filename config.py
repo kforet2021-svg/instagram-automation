@@ -9,8 +9,8 @@ config.py
 - GOOGLE_SERVICE_ACCOUNT_JSON  (※ GOOGLE_ACCOUNT_JSON ではない)
 - INSTAGRAM_FETCH_PROVIDER     (省略時 "brightdata"。現在は "apify" を使用)
 - BRIGHT_DATA_API_KEY  (旧プロバイダ。現在は未使用、必須チェックから除外)
-- NOTION_API_KEY       (Notion Integration Token。未設定時はKBスキップ)
-- NOTION_KB_DATABASE_ID (KBデータベースID。未設定時はworkspace全体を検索)
+- NOTION_API_KEY              (Notion Integration Token。未設定時はKBスキップ)
+- NOTION_METHODOLOGY_PAGE_ID  (CORE HARI Methodology 親ページID。配下を再帰探索)
 
 取得対象アカウント(ジャンル不問のアンテナアカウント)は accounts.py の
 ANTENNA_ACCOUNTSで管理する。新規アカウント候補はcandidate_discovery.pyが
@@ -51,9 +51,11 @@ GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 
 # --- Notion Knowledge Base (Optional) ---
-# 未設定の場合でも動作する（KBなし状態でスキップ）
+# NOTION_API_KEY + NOTION_METHODOLOGY_PAGE_ID の両方が設定されている場合のみ有効。
+# 未設定の場合でも動作する（KBなし状態でスキップ）。
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "")
-NOTION_KB_DATABASE_ID = os.getenv("NOTION_KB_DATABASE_ID", "")
+# CORE HARI Methodology 親ページのID。配下の KB / Reasoning Engine / Principles 等を再帰探索する。
+NOTION_METHODOLOGY_PAGE_ID = os.getenv("NOTION_METHODOLOGY_PAGE_ID", "")
 
 
 def validate_config() -> None:

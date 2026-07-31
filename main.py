@@ -869,7 +869,7 @@ def _score_and_analyze_posts(posts: list) -> None:
         except Exception as e:
             print(f"[NotionKB] KB取得中にエラーが発生しました(スキップ): {e}")
     else:
-        print("[NotionKB] NOTION_API_KEY が未設定のためKBスキップ")
+        print("[NotionKB] NOTION_API_KEY または NOTION_METHODOLOGY_PAGE_ID が未設定のためKBスキップ")
 
     print(f"Research Candidate Score上位{len(targets)}件を個別にAI分析中(構造分析→投稿案生成→成功要因分析→SNS Pattern Lab素材生成)...")
     entries = []

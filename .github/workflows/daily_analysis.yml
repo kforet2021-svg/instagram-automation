@@ -35,7 +35,7 @@ jobs:
           INSTAGRAM_FETCH_PROVIDER: apify
           # Notion Knowledge Base (Optional) — 未設定でもKBスキップで動作継続
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-          NOTION_KB_DATABASE_ID: ${{ secrets.NOTION_KB_DATABASE_ID }}
+          NOTION_METHODOLOGY_PAGE_ID: ${{ secrets.NOTION_METHODOLOGY_PAGE_ID }}
         run: bash run_daily.sh
 
       - name: Upload logs
