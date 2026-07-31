@@ -861,11 +861,14 @@ def _score_and_analyze_posts(posts: list) -> None:
     kb_context = ""
     if notion_kb.is_configured():
         kb_theme = _derive_kb_theme(targets)
-        print(f"[NotionKB] テーマ「{kb_theme[:50]}」でKBを検索中...")
         try:
             kb_pages = notion_kb.fetch_relevant_pages(kb_theme)
             kb_context = notion_kb.format_kb_context(kb_pages)
             notion_kb.log_kb_pages(kb_pages, kb_theme)
+            if kb_context:
+                print(f"[NotionKB] AIへ渡したKB文字数: {len(kb_context):,}文字")
+            elif kb_pages is not None:
+                print("[NotionKB] ⚠ 警告: KBコンテキストが空です。CORE HARIブランドルールなしで投稿を生成します。")
         except Exception as e:
             print(f"[NotionKB] KB取得中にエラーが発生しました(スキップ): {e}")
     else:
@@ -889,7 +892,7 @@ def _score_and_analyze_posts(posts: list) -> None:
             # Threads投稿・キャプション、計21項目)を1回のOpenAI呼び出しで生成
             # する(post_analysis/core_hari_ideaは入力に使わない。ユーザーが
             # 選んだ入力データの方針)。
-            pattern_lab = generate_pattern_lab_content(post, success_factors)
+            pattern_lab = generate_pattern_lab_content(post, success_factors, kb_context=kb_context)
             # 2026-07-03(Creator Intelligence Sprint 1 Task C): North Star
             # Index(仮配点、0〜100点)を計算する。新規のOpenAI呼び出しは発生
             # しない(trend_score内訳とsuccess_factorsのテキストのみから計算する

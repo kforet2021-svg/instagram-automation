@@ -623,14 +623,16 @@ SNS Pattern Labは、運営者個人の顔・実名を一切出さない匿名�
 """
 
 
-def build_pattern_lab_prompt(post: dict, success_factors: dict) -> str:
+def build_pattern_lab_prompt(post: dict, success_factors: dict, kb_context: str = "") -> str:
     """
     SNS Pattern Lab投稿素材生成(generate_pattern_lab_content)用のプロンプトを作る。
     入力はanalyze_success_factorsの結果(success_factors)のみで、post_analysis/
     core_hari_ideaは使わない(ユーザーが選んだ入力データの方針。モジュール
     docstring参照)。main.py._score_and_analyze_postsが、③+④/成功要因分析の後に
     投稿ごとに1回呼び出す。
+    kb_context があれば、専門知識の質を保つための参考情報として先頭に注入する。
     """
+    kb_section = f"{kb_context}\n---\n\n" if kb_context else ""
     post_text = _format_post_for_individual_prompt(post)
     success_factors_text = "\n".join(
         f"・{key}: {(success_factors or {}).get(key, '')}" for key in SUCCESS_FACTOR_TEXT_KEYS
@@ -638,7 +640,7 @@ def build_pattern_lab_prompt(post: dict, success_factors: dict) -> str:
 
     text_keys_json = ",\n".join(f'  "{key}": "..."' for key in PATTERN_LAB_TEXT_KEYS)
 
-    return f"""以下は、Instagramで実際に伸びた1件の投稿の情報と、その成功要因分析結果です。
+    return f"""{kb_section}以下は、Instagramで実際に伸びた1件の投稿の情報と、その成功要因分析結果です。
 
 【元投稿の情報】
 {post_text}

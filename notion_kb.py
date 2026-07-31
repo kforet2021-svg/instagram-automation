@@ -72,9 +72,23 @@ def _headers() -> dict:
 # ---------------------------------------------------------------------------
 
 def _notion_get(url: str, **kwargs) -> dict:
-    """GET リクエスト。429 時は Retry-After 秒待機してリトライ（最大3回）。"""
+    """GET リクエスト。403/404 は分かりやすいエラー、429 はリトライ（最大3回）。"""
     for _ in range(3):
         resp = requests.get(url, headers=_headers(), timeout=20, **kwargs)
+        if resp.status_code == 403:
+            raise PermissionError(
+                "[NotionKB] 403 アクセス拒否: Integration にこのページへのアクセス権がありません。\n"
+                f"  URL: {url}\n"
+                "  Notion ページを開き「接続済みのインテグレーション」にこの Integration を追加してください。\n"
+                "  親ページ (NOTION_METHODOLOGY_PAGE_ID) だけでなく、配下のページ・DBにも権限が必要です。"
+            )
+        if resp.status_code == 404:
+            raise FileNotFoundError(
+                "[NotionKB] 404 ページ未検出: NOTION_METHODOLOGY_PAGE_ID のページが見つかりません。\n"
+                f"  URL: {url}\n"
+                "  .env / GitHub Secrets の NOTION_METHODOLOGY_PAGE_ID が正しいか確認してください。\n"
+                "  Notion ページ URL の末尾32文字（ハイフンなし）がページIDです。"
+            )
         if resp.status_code == 429:
             wait = max(int(resp.headers.get("Retry-After", "2")), 1)
             time.sleep(wait)
@@ -85,9 +99,20 @@ def _notion_get(url: str, **kwargs) -> dict:
 
 
 def _notion_post(url: str, payload: dict, **kwargs) -> dict:
-    """POST リクエスト。429 時はリトライ（最大3回）。"""
+    """POST リクエスト。403/404 は分かりやすいエラー、429 はリトライ（最大3回）。"""
     for _ in range(3):
         resp = requests.post(url, headers=_headers(), json=payload, timeout=20, **kwargs)
+        if resp.status_code == 403:
+            raise PermissionError(
+                "[NotionKB] 403 アクセス拒否: Integration にこのデータベースへのアクセス権がありません。\n"
+                f"  URL: {url}\n"
+                "  Notion ページを開き「接続済みのインテグレーション」にこの Integration を追加してください。"
+            )
+        if resp.status_code == 404:
+            raise FileNotFoundError(
+                "[NotionKB] 404 DB未検出: データベースが見つかりません。\n"
+                f"  URL: {url}"
+            )
         if resp.status_code == 429:
             wait = max(int(resp.headers.get("Retry-After", "2")), 1)
             time.sleep(wait)
@@ -264,6 +289,7 @@ def _traverse_page(
     section: str,
     depth: int,
     visited: set,
+    counter: dict,
 ) -> list:
     """
     ページを起点に再帰的に探索し、全子孫ページのレコードリストを返す。
@@ -275,10 +301,12 @@ def _traverse_page(
 
     child_page       → _traverse_page() を再帰呼び出し
     child_database   → _collect_database_pages() で全ページを収集
+    counter          : {"pages": N, "dbs": M} — 呼び出し元で集計用
     """
     if page_id in visited or depth > _MAX_DEPTH:
         return []
     visited.add(page_id)
+    counter["pages"] = counter.get("pages", 0) + 1
 
     try:
         blocks = _get_blocks(page_id)
@@ -305,13 +333,14 @@ def _traverse_page(
             child_title = (block.get("child_page") or {}).get("title", "")
             # depth=0 直下の子タイトルがセクション名になる
             child_section = child_title if depth == 0 else section
-            sub = _traverse_page(child_id, child_title, child_section, depth + 1, visited)
+            sub = _traverse_page(child_id, child_title, child_section, depth + 1, visited, counter)
             descendant_records.extend(sub)
 
         elif btype == "child_database":
             db_id = block.get("id", "")
             db_title = (block.get("child_database") or {}).get("title", "")
             db_section = db_title if depth == 0 else section
+            counter["dbs"] = counter.get("dbs", 0) + 1
             try:
                 db_records = _collect_database_pages(db_id, db_section, visited)
                 descendant_records.extend(db_records)
@@ -329,18 +358,27 @@ def _traverse_page(
     return this_records + descendant_records
 
 
-def _fetch_all_pages() -> list:
+def _fetch_all_pages() -> tuple:
     """
     NOTION_METHODOLOGY_PAGE_ID を起点に全子孫ページ・DBページを再帰収集する。
+    戻り値: (records: list, stats: dict{"pages_traversed", "dbs_found", "docs_retrieved"})
     """
     visited: set = set()
-    return _traverse_page(
+    counter: dict = {"pages": 0, "dbs": 0}
+    records = _traverse_page(
         NOTION_METHODOLOGY_PAGE_ID,
         title="CORE HARI Methodology",
         section="",
         depth=0,
         visited=visited,
+        counter=counter,
     )
+    stats = {
+        "pages_traversed": counter.get("pages", 0),
+        "dbs_found": counter.get("dbs", 0),
+        "docs_retrieved": len(records),
+    }
+    return records, stats
 
 
 # ---------------------------------------------------------------------------
@@ -385,17 +423,32 @@ def fetch_relevant_pages(theme: str, limit: int = MAX_KB_PAGES) -> list:
     if not is_configured():
         return []
 
+    root_short = (
+        NOTION_METHODOLOGY_PAGE_ID[:8] + "…"
+        if len(NOTION_METHODOLOGY_PAGE_ID) > 8
+        else NOTION_METHODOLOGY_PAGE_ID
+    )
+    print(f"[NotionKB] ルートページID: {root_short}")
+    print(f"[NotionKB] テーマ「{theme[:60]}」でKB探索中...")
+
     try:
-        page_records = _fetch_all_pages()
+        page_records, stats = _fetch_all_pages()
     except Exception as e:
-        print(f"[NotionKB] 再帰探索中にエラーが発生しました: {e}")
+        print(f"[NotionKB] ⚠ 再帰探索エラー: {e}")
         return []
+
+    print(
+        f"[NotionKB] 探索結果: ページ{stats['pages_traversed']}件 / "
+        f"DB{stats['dbs_found']}件 / 文書{stats['docs_retrieved']}件取得"
+    )
 
     if not page_records:
-        print("[NotionKB] 探索対象ページが0件でした")
+        print("[NotionKB] ⚠ 警告: Notion KBから文書が取得できませんでした")
+        print("[NotionKB]   → Integration がルートページ・配下ページ・DBにアクセス可能か確認してください")
+        print("[NotionKB]   → CORE HARIブランドルールなしで投稿を生成します（一般的な美容投稿になる可能性があります）")
         return []
 
-    print(f"[NotionKB] 探索完了: {len(page_records)}ページ → セマンティック検索中...")
+    print(f"[NotionKB] {len(page_records)}件 → セマンティック検索中...")
 
     try:
         all_texts = [theme] + [r["embed_text"] for r in page_records]
@@ -423,8 +476,10 @@ def format_kb_context(pages: list) -> str:
         return ""
 
     lines = [
-        "【CORE HARI ブランド知識 (Notion Knowledge Base)】",
-        "※ 以下のブランドルール・知識を最優先で参照し、一般的な美容情報よりCORE HARIらしい表現・考え方を優先すること。",
+        "【最優先ルール — CORE HARI ブランド知識 (Notion Knowledge Base)】",
+        "以下はNotionから取得したCORE HARIのブランドルール・専門知識です。",
+        "このルールはInstagramの投稿分析結果（フック・構成・CTAの「型」）より必ず優先してください。",
+        "一般的な美容表現は使わず、CORE HARIの独自視点・専門用語・考え方を必ず使ってください。",
         "",
     ]
     for i, page in enumerate(pages, 1):

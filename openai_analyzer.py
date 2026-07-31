@@ -296,7 +296,7 @@ def analyze_success_factors(post: dict) -> dict:
     return result
 
 
-def generate_pattern_lab_content(post: dict, success_factors: dict) -> dict:
+def generate_pattern_lab_content(post: dict, success_factors: dict, kb_context: str = "") -> dict:
     """
     SNS Pattern Lab投稿素材生成(2026-07-01(3回目)追加)。analyze_success_factors
     の結果(success_factors)を入力として、匿名ブランド「SNS Pattern Lab」として
@@ -305,10 +305,11 @@ def generate_pattern_lab_content(post: dict, success_factors: dict) -> dict:
     core_hari_ideaの結果は入力に使わない(ユーザーが選んだ入力データの方針)。
     main.py._score_and_analyze_postsが、成功要因分析の直後に投稿ごとに1回呼び出す
     (1件 = 1回のOpenAI呼び出し。②③+④/成功要因分析と合わせて1投稿あたり計4回)。
+    kb_context: Notion KB文脈（専門知識の質向上に使用。空文字でもよい）。
 
     戻り値: PATTERN_LAB_TEXT_KEYS の各キー(文字列)を含む辞書。
     """
-    prompt = build_pattern_lab_prompt(post or {}, success_factors or {})
+    prompt = build_pattern_lab_prompt(post or {}, success_factors or {}, kb_context=kb_context)
     content = _call_openai(prompt, system_prompt=PATTERN_LAB_SYSTEM_PROMPT, label=f"pattern lab ({post.get('username','')})")
 
     parsed = _parse_response_content(content, PATTERN_LAB_TEXT_KEYS)
