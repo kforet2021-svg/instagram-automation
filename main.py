@@ -354,6 +354,7 @@ from creator_studio import (
     generate_creator_studio_daily, print_creator_studio_summary,
     generate_phase1_daily, print_phase1_summary,
 )
+import notion_kb
 from research_candidate_score import (
     score_posts,
     sort_by_score,
@@ -669,6 +670,21 @@ def _grow_antenna_accounts(raw_posts: list, known_accounts: list) -> None:
             print(f"account_mention_trackerシートへの記録中にエラーが発生しました: {e}")
 
 
+def _derive_kb_theme(targets: list) -> str:
+    """
+    AI分析対象投稿のキャプションからNotionKB検索用テーマキーワードを導出する。
+    キャプションが取得できない場合は固定の CORE HARI キーワードを返す。
+    """
+    fragments = []
+    for post in targets[:3]:
+        cap = (post.get("caption") or "").replace("\n", " ").strip()
+        if cap:
+            fragments.append(cap[:50])
+    if fragments:
+        return " ".join(fragments)
+    return "CORE HARI 小顔矯正 顔筋 たるみ リフトアップ"
+
+
 def _score_and_analyze_posts(posts: list) -> None:
     """
     プール対象の投稿"全件"についてResearch Candidate Score(0〜100点。
@@ -841,12 +857,26 @@ def _score_and_analyze_posts(posts: list) -> None:
         print("本日はResearch Candidate Scoreのしきい値を超える投稿がなかったため、AI個別分析はスキップしました")
         return accepted_posts
 
+    # Notion Knowledge Base RAG: Instagram分析後にブランド知識を読み込む
+    kb_context = ""
+    if notion_kb.is_configured():
+        kb_theme = _derive_kb_theme(targets)
+        print(f"[NotionKB] テーマ「{kb_theme[:50]}」でKBを検索中...")
+        try:
+            kb_pages = notion_kb.fetch_relevant_pages(kb_theme)
+            kb_context = notion_kb.format_kb_context(kb_pages)
+            notion_kb.log_kb_pages(kb_pages, kb_theme)
+        except Exception as e:
+            print(f"[NotionKB] KB取得中にエラーが発生しました(スキップ): {e}")
+    else:
+        print("[NotionKB] NOTION_API_KEY が未設定のためKBスキップ")
+
     print(f"Research Candidate Score上位{len(targets)}件を個別にAI分析中(構造分析→投稿案生成→成功要因分析→SNS Pattern Lab素材生成)...")
     entries = []
     for post in targets:
         try:
             analysis = analyze_post_structure(post)
-            idea = generate_core_hari_idea(post, analysis)
+            idea = generate_core_hari_idea(post, analysis, kb_context=kb_context)
             # 2026-07-01(2回目): Trend Score(数値配点)とは別のAI分析「成功要因
             # 分析」(なぜ伸びたか・冒頭3秒のフック・構成・CTA・心理トリガー・
             # CORE HARI FACEへの応用方法)。analyze_post_structure/generate_
@@ -974,7 +1004,7 @@ def _score_and_analyze_posts(posts: list) -> None:
     # 2026-07-17: Research Candidate Sheet改善⑥ 編集長コメント(1回/実行、+1 OpenAI)
     # qualifying投稿全件のsuccess_factors結果を入力に、4項目を生成してeditorial_commentシートに保存。
     try:
-        editorial_result = generate_editorial_comment(entries)
+        editorial_result = generate_editorial_comment(entries, kb_context=kb_context)
         save_editorial_comment(entries, editorial_result)
         print("編集長コメントをeditorial_commentシートに保存しました")
     except Exception as e:
@@ -982,7 +1012,7 @@ def _score_and_analyze_posts(posts: list) -> None:
 
     # 2026-07-29: AI編集長 v2 — Hook5案生成・採点・最優秀案採用・修正版生成(+1 OpenAI)
     try:
-        v2_results = generate_editorial_v2(entries)
+        v2_results = generate_editorial_v2(entries, kb_context=kb_context)
         save_editorial_v2(entries, v2_results)
         print(f"AI編集長 v2 をeditorial_v2シートに保存しました({len(v2_results)}件)")
     except Exception as e:

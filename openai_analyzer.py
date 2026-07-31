@@ -249,16 +249,17 @@ def analyze_post_structure(post: dict) -> dict:
     return result
 
 
-def generate_core_hari_idea(post: dict, analysis: dict) -> dict:
+def generate_core_hari_idea(post: dict, analysis: dict, kb_context: str = "") -> dict:
     """
     ③CORE HARI FACE変換 + ④投稿案生成。analyze_post_structure()の結果
     (analysis)を入力として、CORE HARI FACE向けの具体的な投稿案を生成する。
     main.py._score_and_analyze_postsが、②の直後に投稿ごとに1回呼び出す
     (1件 = 1回のOpenAI呼び出し。②と合わせて1投稿あたり計2回)。
 
+    kb_context: notion_kb.format_kb_context()の結果。ブランドルールを優先させる。
     戻り値: CORE_HARI_IDEA_TEXT_KEYS の各キー(文字列)を含む辞書。
     """
-    prompt = build_core_hari_idea_prompt(post or {}, analysis or {})
+    prompt = build_core_hari_idea_prompt(post or {}, analysis or {}, kb_context=kb_context)
     content = _call_openai(prompt, system_prompt=CORE_HARI_IDEA_SYSTEM_PROMPT, label=f"core hari idea ({post.get('username','')})")
 
     parsed = _parse_response_content(content, CORE_HARI_IDEA_TEXT_KEYS)
@@ -364,20 +365,21 @@ def generate_north_star_daily(entries: list, validated_patterns: list = None) ->
     return result
 
 
-def generate_editorial_comment(entries: list) -> dict:
+def generate_editorial_comment(entries: list, kb_context: str = "") -> dict:
     """
     編集長コメント(Research Candidate Sheet改善⑥)を生成する(2026-07-17追加)。
     1回/実行。qualifying投稿(entries)全件のsuccess_factors結果を入力に、
     EDITORIAL_COMMENT_TEXT_KEYSの4項目を出力する。
 
     entries: [{"post":..., "success_factors":..., ...}] 形式
+    kb_context: notion_kb.format_kb_context()の結果。ブランドルールを優先させる。
     戻り値: EDITORIAL_COMMENT_TEXT_KEYSの各キーを含む辞書。
             entriesが空の場合はall-emptyの辞書を返す(エラーにしない)。
     """
     if not entries:
         return {key: "" for key in EDITORIAL_COMMENT_TEXT_KEYS}
 
-    prompt = build_editorial_comment_prompt(entries)
+    prompt = build_editorial_comment_prompt(entries, kb_context=kb_context)
     content = _call_openai(
         prompt,
         system_prompt=EDITORIAL_COMMENT_SYSTEM_PROMPT,
@@ -388,12 +390,13 @@ def generate_editorial_comment(entries: list) -> dict:
     return {key: str(parsed.get(key, "")).strip() for key in EDITORIAL_COMMENT_TEXT_KEYS}
 
 
-def generate_editorial_v2(entries: list) -> list:
+def generate_editorial_v2(entries: list, kb_context: str = "") -> list:
     """
     AI編集長 v2 — 生成済み投稿案を公開前に査読し、Hook改善案を出力する。
     【2026-07-29追加】1回/実行。entriesを1プロンプトでまとめて処理。
 
     entries: [{"post":..., "idea":..., "success_factors":...}]
+    kb_context: notion_kb.format_kb_context()の結果。ブランドルールを優先させる。
     戻り値: 投稿1件あたり1 dictのリスト。各dictのキー:
         post_url, original_hook,
         hooks (list of {rank,hook,ctr,save_rate,comment_rate,score}),
@@ -403,7 +406,7 @@ def generate_editorial_v2(entries: list) -> list:
     if not entries:
         return []
 
-    prompt = build_editorial_v2_prompt(entries)
+    prompt = build_editorial_v2_prompt(entries, kb_context=kb_context)
     content = _call_openai(
         prompt,
         system_prompt=EDITORIAL_V2_SYSTEM_PROMPT,

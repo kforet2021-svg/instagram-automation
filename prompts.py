@@ -790,12 +790,13 @@ JSON形式のみで出力してください(キー名は厳守):
 """
 
 
-def build_core_hari_idea_prompt(post: dict, analysis: dict) -> str:
+def build_core_hari_idea_prompt(post: dict, analysis: dict, kb_context: str = "") -> str:
     """
     ③CORE HARI FACE変換 + ④投稿案生成: build_post_structure_analysis_promptの
     分析結果(analysis)を入力として、CORE HARI FACE向けの具体的な投稿案を
     生成するプロンプトを作る(main.py._score_and_analyze_postsが、②の直後に
     投稿ごとに1回呼び出す)。
+    kb_context: notion_kb.format_kb_context()の結果。設定時はブランド知識を先頭に注入する。
     """
     post_text = _format_post_for_individual_prompt(post)
     analysis_text = "\n".join(
@@ -804,7 +805,9 @@ def build_core_hari_idea_prompt(post: dict, analysis: dict) -> str:
 
     text_keys_json = ",\n".join(f'  "{key}": "..."' for key in CORE_HARI_IDEA_TEXT_KEYS)
 
-    return f"""以下は、Instagramで実際に伸びた1件の投稿の「構造分析結果」です。
+    kb_section = f"{kb_context}\n---\n\n" if kb_context else ""
+
+    return f"""{kb_section}以下は、Instagramで実際に伸びた1件の投稿の「構造分析結果」です。
 
 【構造分析結果(伸びた理由・フックの型・構成・CTAの型)】
 {analysis_text}
@@ -1050,11 +1053,12 @@ EDITORIAL_COMMENT_SYSTEM_PROMPT = """あなたはCORE HARI FACE専属のInstagra
 CORE HARI FACE = 札幌の顔専門エステサロン(小顔矯正・顔筋トレーニング・たるみ改善)"""
 
 
-def build_editorial_comment_prompt(entries: list) -> str:
+def build_editorial_comment_prompt(entries: list, kb_context: str = "") -> str:
     """
     編集長コメント(generate_editorial_comment)用プロンプトを作る。
     entries: [{"post":..., "success_factors":..., ...}] 形式
     (main.py._score_and_analyze_postsが生成した当日のentries全件)
+    kb_context: notion_kb.format_kb_context()の結果。設定時はブランド知識を先頭に注入する。
     """
     lines = [
         f"【本日の分析対象】{len(entries)}件のリール投稿",
@@ -1076,8 +1080,9 @@ def build_editorial_comment_prompt(entries: list) -> str:
 
     text_keys_json = ",\n".join(f'  "{key}": "..."' for key in EDITORIAL_COMMENT_TEXT_KEYS)
 
+    kb_section = f"{kb_context}\n---\n\n" if kb_context else ""
     data_text = "\n".join(lines)
-    return f"""{data_text}
+    return f"""{kb_section}{data_text}
 
 ---
 上記の分析結果を踏まえて、編集長として4項目のコメントをJSON形式で出力してください。
@@ -1126,13 +1131,15 @@ CORE HARI FACE（札幌の顔専門エステサロン：小顔矯正・顔筋ト
 JSONのみ。"entries"キーに配列で各投稿の結果を入れる。"""
 
 
-def build_editorial_v2_prompt(entries: list) -> str:
+def build_editorial_v2_prompt(entries: list, kb_context: str = "") -> str:
     """
     AI編集長 v2 用プロンプトを構築する。
     entries: [{"post":..., "idea":..., "success_factors":...}]
+    kb_context: notion_kb.format_kb_context()の結果。設定時はブランド知識を先頭に注入する。
     """
+    kb_section = f"{kb_context}\n---\n\n" if kb_context else ""
     lines = [
-        f"【査読対象】{len(entries)}件のCORE HARI FACE投稿案",
+        kb_section + f"【査読対象】{len(entries)}件のCORE HARI FACE投稿案",
         "",
         "各投稿案に対して:",
         f"1. Hookを{EDITORIAL_V2_HOOK_COUNT}案生成",
